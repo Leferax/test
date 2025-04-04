@@ -9,8 +9,6 @@ hostnamectl set-hostname preprod-safyra
 
 echo "Port 8222
 PermitRootLogin yes
-PasswordAuthentication no
-PermitEmptyPasswords no
 MaxAuthTries 3
 X11Forwarding no" > /etc/ssh/sshd_config
 
