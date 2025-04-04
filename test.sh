@@ -181,8 +181,10 @@ wget -q https://mirror.in2p3.fr/pub/fedora/linux/releases/40/Cloud/x86_64/images
 cd ~
 
 useradd safyradmin -m -s /bin/bash
-echo "safyradmin:$(openssl rand -base64 18)" | chpasswd
+SAFYRADMIN_PASSWORD=$(openssl rand -base64 18)
+echo "safyradmin:${SAFYRADMIN_PASSWORD}" | chpasswd
 usermod -aG sudo safyradmin
+echo "SAFYRADMIN_PASSWORD=${SAFYRADMIN_PASSWORD}" >> /root/.safyra_credentials
 
 mkdir -p /home/safyradmin/.ssh /root/.ssh
 chmod 700 /home/safyradmin/.ssh /root/.ssh
@@ -196,13 +198,13 @@ pveum aclmod / -user terraform@pve -role TerraformRole
 pveum user token add terraform@pve terraform-token --output-format json > /etc/pve/.terraform-token.json
 #chmod 600 /etc/pve/.terraform-token.json
 
-echo "TERRAFORM_PASSWORD=$(openssl rand -base64 18)" > /root/.safyra_credentials
+#echo "TERRAFORM_PASSWORD=$(openssl rand -base64 18)" > /root/.safyra_credentials
 chmod 600 /root/.safyra_credentials
 
 lynis audit system > /root/lynis_report.txt
 chmod 600 /root/lynis_report.txt
 
-systemctl restart pveproxy
+#systemctl restart pveproxy
 systemctl restart networking
 
 echo "[DONE] SAFYRA INSTALL - $(date)"
