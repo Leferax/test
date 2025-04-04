@@ -8,12 +8,12 @@ echo "[START] SAFYRA INSTALL - $(date)"
 hostnamectl set-hostname preprod-safyra
 
 echo "Port 8222
-PermitRootLogin yes
-MaxAuthTries 3
+#PermitRootLogin yes
+#MaxAuthTries 3
 X11Forwarding no" > /etc/ssh/sshd_config
 
 echo "WARNING: Unauthorized access is prohibited " > /etc/issue.net
-sed -i 's/^UMASK.*/UMASK\t027/' /etc/login.defs
+#sed -i 's/^UMASK.*/UMASK\t027/' /etc/login.defs
 systemctl restart ssh
 
 systemctl disable postfix
@@ -77,6 +77,8 @@ chmod 600 /root/.safyra_credentials
 lynis audit system > /root/lynis_report.txt
 chmod 600 /root/lynis_report.txt
 
-systemctl restart pveproxy ssh networking
+systemctl restart pveproxy
+systemctl restart ssh
+systemctl restart networking
 
 echo "[DONE] SAFYRA INSTALL - $(date)"
