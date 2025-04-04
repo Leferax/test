@@ -194,7 +194,7 @@ pveum user add terraform@pve -comment "Terraform Automation"
 pveum role add TerraformRole -privs "VM.Allocate VM.Audit Datastore.AllocateSpace Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt SDN.Use"
 pveum aclmod / -user terraform@pve -role TerraformRole
 pveum user token add terraform@pve terraform-token --output-format json > /etc/pve/.terraform-token.json
-chmod 600 /etc/pve/.terraform-token.json
+#chmod 600 /etc/pve/.terraform-token.json
 
 echo "TERRAFORM_PASSWORD=$(openssl rand -base64 18)" > /root/.safyra_credentials
 chmod 600 /root/.safyra_credentials
