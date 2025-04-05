@@ -187,7 +187,6 @@ usermod -aG sudo safyradmin
 echo "SAFYRADMIN_PASSWORD=${SAFYRADMIN_PASSWORD}" >> /root/.safyra_credentials
 
 cp -r /root/.ssh /root/.ssh.bak
-echo ${ secrets.PUBLIC_KEY } >> /root/.ssh/authorized_keys
 #mkdir -p /home/safyradmin/.ssh /root/.ssh
 #chmod 700 /home/safyradmin/.ssh /root/.ssh
 #cp /root/.ssh/authorized_keys /home/safyradmin/.ssh/authorized_keys 
