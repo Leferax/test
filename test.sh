@@ -186,11 +186,12 @@ echo "safyradmin:${SAFYRADMIN_PASSWORD}" | chpasswd
 usermod -aG sudo safyradmin
 echo "SAFYRADMIN_PASSWORD=${SAFYRADMIN_PASSWORD}" >> /root/.safyra_credentials
 
-mkdir -p /home/safyradmin/.ssh /root/.ssh
-chmod 700 /home/safyradmin/.ssh /root/.ssh
-cp /root/.ssh/authorized_keys /home/safyradmin/.ssh/authorized_keys || true
-chmod 600 /home/safyradmin/.ssh/authorized_keys /root/.ssh/authorized_keys
-chown -R safyradmin:safyradmin /home/safyradmin/.ssh
+cp -r /root/.ssh /root/.ssh.bak
+#mkdir -p /home/safyradmin/.ssh /root/.ssh
+#chmod 700 /home/safyradmin/.ssh /root/.ssh
+#cp /root/.ssh/authorized_keys /home/safyradmin/.ssh/authorized_keys 
+#chmod 600 /home/safyradmin/.ssh/authorized_keys /root/.ssh/authorized_keys
+#chown -R safyradmin:safyradmin /home/safyradmin/.ssh
 
 pveum user add terraform@pve -comment "Terraform Automation"
 pveum role add TerraformRole -privs "VM.Allocate VM.Audit Datastore.AllocateSpace Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt SDN.Use"
