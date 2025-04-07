@@ -205,7 +205,6 @@ chmod 600 /root/.safyra_credentials
 lynis audit system > /root/lynis_report.txt
 chmod 600 /root/lynis_report.txt
 
-systemctl restart pveproxy
-systemctl restart networking
+reboot 
 
 echo "[DONE] SAFYRA INSTALL - $(date)"
