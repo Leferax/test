@@ -175,10 +175,13 @@ echo "deb [signed-by=/usr/share/keyrings/hashicorp.gpg] https://apt.releases.has
 apt update
 apt install terraform -y
 
-mkdir -p /var/lib/vz/template/iso
-cd /var/lib/vz/template/iso
-wget -q https://mirror.in2p3.fr/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2
-cd ~
+#mkdir -p /var/lib/vz/template/iso
+#cd /var/lib/vz/template/iso
+#wget -q https://mirror.in2p3.fr/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2
+#cd ~
+pveam download debian-12-standard_12.7-1_amd64.tar.zst
+pveam download fedora-41-default_20241118_amd64.tar.xz
+
 
 useradd safyradmin -m -s /bin/bash
 SAFYRADMIN_PASSWORD=$(openssl rand -base64 18)
