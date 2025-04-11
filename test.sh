@@ -181,8 +181,8 @@ apt install terraform -y
 #cd ~
 
 systemctl stop pve-cluster pvedaemon pvestatd
-umount /var/lib/vz
-lvremove vg/data
+umount -lf /var/lib/vz
+lvremove -y vg/data
 lvcreate -l 100%FREE -T vg/data
 systemctl restart pve-cluster pvedaemon pvestatd
 pvesm add lvmthin local-lvm --vgname vg --thinpool data
