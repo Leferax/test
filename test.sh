@@ -179,8 +179,18 @@ apt install terraform -y
 #cd /var/lib/vz/template/iso
 #wget -q https://mirror.in2p3.fr/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2
 #cd ~
-pveam download debian-12-standard_12.7-1_amd64.tar.zst
-pveam download fedora-41-default_20241118_amd64.tar.xz
+
+systemctl stop pve-cluster pvedaemon pvestatd
+umount /var/lib/vz
+lvremove vg/data
+lvcreate -l 100%FREE -T vg/data
+systemctl restart pve-cluster pvedaemon pvestatd
+pvesm add lvmthin local-lvm --vgname vg --thinpool data
+pvesm status
+
+
+pveam download local-lvm debian-12-standard_12.7-1_amd64.tar.zst
+pveam download local-lvm fedora-41-default_20241118_amd64.tar.xz
 
 
 useradd safyradmin -m -s /bin/bash
@@ -195,14 +205,6 @@ chmod 700 /home/safyradmin/.ssh
 cat /root/.ssh/authorized_keys >> /home/safyradmin/.ssh/authorized_keys 
 chmod 600 /home/safyradmin/.ssh/authorized_keys
 chown -R safyradmin:safyradmin /home/safyradmin/.ssh
-
-systemctl stop pve-cluster pvedaemon pvestatd
-umount /var/lib/vz
-lvremove vg/data
-lvcreate -l 100%FREE -T vg/data
-systemctl restart pve-cluster pvedaemon pvestatd
-pvesm add lvmthin local-lvm --vgname vg --thinpool data
-pvesm status
 
 pveum user add terraform@pve -comment "Terraform Automation"
 pveum role add TerraformRole -privs "VM.Allocate VM.Audit Datastore.AllocateSpace Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt SDN.Use"
