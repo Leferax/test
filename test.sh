@@ -189,8 +189,8 @@ pvesm add lvmthin local-lvm --vgname vg --thinpool data
 pvesm status
 
 
-pveam download local-lvm debian-12-standard_12.7-1_amd64.tar.zst
-pveam download local-lvm fedora-41-default_20241118_amd64.tar.xz
+pveam download local debian-12-standard_12.7-1_amd64.tar.zst
+pveam download local fedora-41-default_20241118_amd64.tar.xz
 
 
 useradd safyradmin -m -s /bin/bash
