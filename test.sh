@@ -180,13 +180,13 @@ apt install terraform -y
 #wget -q https://mirror.in2p3.fr/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2
 #cd ~
 
-systemctl stop pve-cluster pvedaemon pvestatd
-umount -lf /var/lib/vz
-lvremove -y vg/data
-lvcreate -l 100%FREE -T vg/data
-systemctl restart pve-cluster pvedaemon pvestatd
-pvesm add lvmthin local-lvm --vgname vg --thinpool data
-pvesm status
+#systemctl stop pve-cluster pvedaemon pvestatd
+#umount -lf /var/lib/vz
+#lvremove -y vg/data
+#lvcreate -l 100%FREE -T vg/data
+#systemctl restart pve-cluster pvedaemon pvestatd
+#pvesm add lvmthin local-lvm --vgname vg --thinpool data
+#pvesm status
 
 
 pveam download local debian-12-standard_12.7-1_amd64.tar.zst
