@@ -7,6 +7,29 @@ echo "[START] SAFYRA INSTALL - $(date)"
 
 hostnamectl set-hostname preprod-safyra
 
+mkdir -p /var/lib/vz/template/iso
+cd /var/lib/vz/template/iso
+wget -q https://mirror.in2p3.fr/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2
+cd ~
+
+systemctl stop pve-cluster pvedaemon pvestatd
+
+sleep 10 
+
+umount -lf /var/lib/vz
+lvremove -y vg/data
+lvcreate -l 100%FREE -T vg/data
+
+sleep 20
+
+systemctl start pve-cluster pvedaemon pvestatd
+pvesm add lvmthin local-lvm --vgname vg --thinpool data
+pvesm status
+
+
+pveam download local debian-12-standard_12.7-1_amd64.tar.zst
+pveam download local fedora-41-default_20241118_amd64.tar.xz
+
 echo "
 # This is the sshd server system-wide configuration file.  See
 # sshd_config(5) for more information.
@@ -175,22 +198,7 @@ echo "deb [signed-by=/usr/share/keyrings/hashicorp.gpg] https://apt.releases.has
 apt update
 apt install terraform -y
 
-#mkdir -p /var/lib/vz/template/iso
-#cd /var/lib/vz/template/iso
-#wget -q https://mirror.in2p3.fr/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2
-#cd ~
 
-#systemctl stop pve-cluster pvedaemon pvestatd
-#umount -lf /var/lib/vz
-#lvremove -y vg/data
-#lvcreate -l 100%FREE -T vg/data
-#systemctl start pve-cluster pvedaemon pvestatd
-#pvesm add lvmthin local-lvm --vgname vg --thinpool data
-#pvesm status
-
-
-pveam download local debian-12-standard_12.7-1_amd64.tar.zst
-pveam download local fedora-41-default_20241118_amd64.tar.xz
 
 
 useradd safyradmin -m -s /bin/bash
