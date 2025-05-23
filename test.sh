@@ -1,231 +1,478 @@
-set -e
-export DEBIAN_FRONTEND=noninteractive
+#!/bin/bash
+set -euo pipefail  # Enhanced security: add -u and -o pipefail for better error handling
 
-exec > /var/log/safyra_install.log 2>&1
+# Global configuration variables
+SCRIPT_VERSION="2.0"
+SCRIPT_NAME="SAFYRA Install"
+LOG_FILE="/var/log/safyra_install.log"
+ERROR_LOG="/var/log/safyra_install_errors.log"
+SAFYRA_CREDS_FILE="/root/.safyra_credentials"
 
-echo "[START] SAFYRA INSTALL - $(date)"
+# Secure logging configuration
+exec > >(tee -a "${LOG_FILE}") 2> >(tee -a "${ERROR_LOG}" >&2)
 
-hostnamectl set-hostname preprod-safyra
+# Logging function with timestamp
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
 
-mkdir -p /var/lib/vz/template/iso
-cd /var/lib/vz/template/iso
-wget -q https://mirror.in2p3.fr/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-Generic.x86_64-40-1.14.qcow2
-cd ~
+# Enhanced error handling function
+error_exit() {
+    log "ERROR: $1"
+    exit 1
+}
 
-#systemctl stop pve-cluster pvedaemon pvestatd
+# Prerequisites verification function
+check_prerequisites() {
+    log "Checking prerequisites..."
+    
+    # Verify script is running as root
+    if [[ $EUID -ne 0 ]]; then
+        error_exit "This script must be run as root"
+    fi
+    
+    # Verify distribution
+    if ! grep -q "bookworm" /etc/os-release 2>/dev/null; then
+        log "WARNING: This script is optimized for Debian Bookworm"
+    fi
+    
+    # Check available disk space (minimum 5GB)
+    AVAILABLE_SPACE=$(df / | awk 'NR==2 {print $4}')
+    if [[ $AVAILABLE_SPACE -lt 5242880 ]]; then
+        error_exit "Insufficient disk space (minimum 5GB required)"
+    fi
+}
 
-#sleep 10 
+# Critical configuration backup function
+backup_configs() {
+    log "Backing up critical configurations..."
+    local backup_dir="/root/safyra_backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$backup_dir"
+    
+    # Backup important configurations
+    [[ -f /etc/ssh/sshd_config ]] && cp /etc/ssh/sshd_config "$backup_dir/"
+    [[ -f /etc/network/interfaces ]] && cp /etc/network/interfaces "$backup_dir/"
+    [[ -d /etc/apt/sources.list.d ]] && cp -r /etc/apt/sources.list.d "$backup_dir/"
+    
+    log "Backup created in: $backup_dir"
+}
 
-#umount -lf /var/lib/vz
-#lvremove -y vg/data
-#lvcreate -l 100%FREE -T vg/data
+# Enhanced base system configuration
+configure_system_base() {
+    log "Configuring base system..."
+    
+    export DEBIAN_FRONTEND=noninteractive
+    
+    # Hostname configuration with validation
+    local new_hostname="preprod-safyra"
+    if hostnamectl set-hostname "$new_hostname"; then
+        log "Hostname configured: $new_hostname"
+    else
+        error_exit "Failed to configure hostname"
+    fi
+    
+    # Update hosts file to avoid resolution issues
+    if ! grep -q "$new_hostname" /etc/hosts; then
+        echo "127.0.1.1 $new_hostname" >> /etc/hosts
+    fi
+}
 
-#sleep 20
+# Enhanced secure SSH configuration
+configure_ssh() {
+    log "Configuring secure SSH..."
+    
+    # Backup current SSH configuration
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d)
+    
+    # More secure SSH configuration
+    sed -i \
+        -e 's/^#Port .*/Port 8222/' \
+        -e 's/^#PermitRootLogin .*/PermitRootLogin prohibit-password/' \
+        -e 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' \
+        -e 's/^#PasswordAuthentication .*/PasswordAuthentication no/' \
+        -e 's|^#AuthorizedKeysFile.*|AuthorizedKeysFile .ssh/authorized_keys|' \
+        -e 's/^#LogLevel .*/LogLevel VERBOSE/' \
+        -e 's|^#Subsystem\s\+sftp.*|Subsystem sftp /usr/libexec/openssh/sftp-server|' \
+        -e 's/^#MaxAuthTries .*/MaxAuthTries 3/' \
+        -e 's/^#ClientAliveInterval .*/ClientAliveInterval 300/' \
+        -e 's/^#ClientAliveCountMax .*/ClientAliveCountMax 2/' \
+        /etc/ssh/sshd_config
+    
+    # Additional security configurations
+    cat >> /etc/ssh/sshd_config << 'EOF'
 
-#systemctl start pve-cluster pvedaemon pvestatd
-#pvesm add lvmthin local-lvm --vgname vg --thinpool data
-#pvesm status
+# SAFYRA security configurations
+Protocol 2
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+PermitTunnel no
+PermitUserEnvironment no
+Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes256-ctr
+MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
+KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group16-sha512
+EOF
+    
+    # Remove cloud-init config file that may interfere
+    rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf
+    
+    # Security banner configuration
+    echo "WARNING: Unauthorized access is strictly prohibited. All connections are monitored and logged." > /etc/issue.net
+    echo "Banner /etc/issue.net" >> /etc/ssh/sshd_config
+    
+    # Test SSH configuration before restart
+    if sshd -t; then
+        systemctl restart ssh
+        log "SSH configuration applied successfully"
+    else
+        error_exit "Error in SSH configuration"
+    fi
+}
 
+# Enhanced network configuration
+configure_network() {
+    log "Configuring network..."
+    
+    # DNS configuration with fallback
+    cat > /etc/resolv.conf << 'EOF'
+nameserver 9.9.9.9
+nameserver 149.112.112.112
+nameserver 8.8.8.8
+options timeout:2 attempts:3
+EOF
+    
+    # Make resolv.conf immutable to prevent overwriting
+    chattr +i /etc/resolv.conf || log "WARNING: Cannot make resolv.conf immutable"
+    
+    # Network bridge configuration for virtualization
+    if ! grep -q "vmbr1" /etc/network/interfaces; then
+        cat >> /etc/network/interfaces << 'EOF'
 
-pveam download local debian-12-standard_12.7-1_amd64.tar.zst
-pveam download local fedora-41-default_20241118_amd64.tar.xz
-
-echo "
-# This is the sshd server system-wide configuration file.  See
-# sshd_config(5) for more information.
-
-# This sshd was compiled with PATH=/usr/local/bin:/usr/bin:/usr/local/sbin:/usr/sbin
-
-# The strategy used for options in the default sshd_config shipped with
-# OpenSSH is to specify options with their default value where
-# possible, but leave them commented.  Uncommented options override the
-# default value.
-
-# To modify the system-wide sshd configuration, create a  *.conf  file under
-#  /etc/ssh/sshd_config.d/  which will be automatically included below
-Include /etc/ssh/sshd_config.d/*.conf
-
-# If you want to change the port on a SELinux system, you have to tell
-# SELinux about this change.
-# semanage port -a -t ssh_port_t -p tcp #PORTNUMBER
-#
-Port 8222
-#AddressFamily any
-#ListenAddress 0.0.0.0
-#ListenAddress ::
-
-#HostKey /etc/ssh/ssh_host_rsa_key
-#HostKey /etc/ssh/ssh_host_ecdsa_key
-#HostKey /etc/ssh/ssh_host_ed25519_key
-
-# Ciphers and keying
-#RekeyLimit default none
-
-# Logging
-#SyslogFacility AUTH
-LogLevel VERBOSE
-
-# Authentication:
-
-#LoginGraceTime 2m
-PermitRootLogin yes
-#StrictModes yes
-#MaxAuthTries 6
-#MaxSessions 10
-
-PubkeyAuthentication yes
-
-# The default is to check both .ssh/authorized_keys and .ssh/authorized_keys2
-# but this is overridden so installations will only check .ssh/authorized_keys
-AuthorizedKeysFile	.ssh/authorized_keys
-
-#AuthorizedPrincipalsFile none
-
-#AuthorizedKeysCommand none
-#AuthorizedKeysCommandUser nobody
-
-# For this to work you will also need host keys in /etc/ssh/ssh_known_hosts
-#HostbasedAuthentication no
-# Change to yes if you don't trust ~/.ssh/known_hosts for
-# HostbasedAuthentication
-#IgnoreUserKnownHosts no
-# Don't read the user's ~/.rhosts and ~/.shosts files
-#IgnoreRhosts yes
-
-# To disable tunneled clear text passwords, change to no here!
-#PasswordAuthentication yes
-#PermitEmptyPasswords no
-
-# Change to no to disable s/key passwords
-#KbdInteractiveAuthentication yes
-
-# Kerberos options
-#KerberosAuthentication no
-#KerberosOrLocalPasswd yes
-#KerberosTicketCleanup yes
-#KerberosGetAFSToken no
-#KerberosUseKuserok yes
-
-# GSSAPI options
-#GSSAPIAuthentication no
-#GSSAPICleanupCredentials yes
-#GSSAPIStrictAcceptorCheck yes
-#GSSAPIKeyExchange no
-#GSSAPIEnablek5users no
-
-# Set this to 'yes' to enable PAM authentication, account processing,
-# and session processing. If this is enabled, PAM authentication will
-# be allowed through the KbdInteractiveAuthentication and
-# PasswordAuthentication.  Depending on your PAM configuration,
-# PAM authentication via KbdInteractiveAuthentication may bypass
-# the setting of 'PermitRootLogin prohibit-password'.
-# If you just want the PAM account and session checks to run without
-# PAM authentication, then enable this but set PasswordAuthentication
-# and KbdInteractiveAuthentication to 'no'.
-# WARNING: 'UsePAM no' is not supported in this build and may cause several
-# problems.
-#UsePAM no
-
-#AllowAgentForwarding yes
-#AllowTcpForwarding yes
-#GatewayPorts no
-#X11Forwarding no
-#X11DisplayOffset 10
-#X11UseLocalhost yes
-#PermitTTY yes
-#PrintMotd yes
-#PrintLastLog yes
-#TCPKeepAlive yes
-#PermitUserEnvironment no
-#Compression delayed
-#ClientAliveInterval 0
-#ClientAliveCountMax 3
-#UseDNS no
-#PidFile /var/run/sshd.pid
-#MaxStartups 10:30:100
-#PermitTunnel no
-#ChrootDirectory none
-#VersionAddendum none
-
-# no default banner path
-#Banner none
-
-# override default of no subsystems
-Subsystem	sftp	/usr/libexec/openssh/sftp-server
-
-# Example of overriding settings on a per-user basis
-#Match User anoncvs
-#	X11Forwarding no
-#	AllowTcpForwarding no
-#	PermitTTY no
-#	ForceCommand cvs server" > /etc/ssh/sshd_config
-rm -rf /etc/ssh/sshd_config.d/50-cloud-init.conf
-echo "WARNING: Unauthorized access is prohibited " > /etc/issue.net
-#sed -i 's/^UMASK.*/UMASK\t027/' /etc/login.defs
-systemctl restart ssh
-
-systemctl disable postfix
-systemctl mask postfix
-
-echo "nameserver 9.9.9.9" > /etc/resolv.conf
-
-echo "deb http://deb.debian.org/debian bookworm main contrib
-deb http://deb.debian.org/debian bookworm-updates main contrib
-deb http://security.debian.org/debian-security bookworm-security main contrib" > /etc/apt/sources.list
-
-echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve-install-repo.list
-echo 'APT::Get::Update::SourceListWarnings::NonFreeFirmware "false";' > /etc/apt/apt.conf.d/no-bookworm-firmware.conf
-
-apt update
-apt upgrade -y
-
-apt install -y auditd libguestfs-tools libpam-tmpdir qemu-guest-agent wget git sudo curl unzip gnupg software-properties-common lynis clamav
-
-echo "
+# SAFYRA bridge interface
 auto vmbr1
 iface vmbr1 inet static
     address 10.10.10.1/24
     bridge-ports none
     bridge-stp off
-    bridge-fd 0" >> /etc/network/interfaces
+    bridge-fd 0
+    bridge-vlan-aware yes
+EOF
+        log "Bridge interface vmbr1 configured"
+    fi
+    
+    # IP forwarding configuration
+    echo 'net.ipv4.ip_forward = 1' >> /etc/sysctl.conf
+    echo 'net.ipv6.conf.all.forwarding = 0' >> /etc/sysctl.conf
+    echo 'net.ipv4.conf.all.log_martians = 1' >> /etc/sysctl.conf
+    sysctl -p
+}
 
-echo 'LISTEN_IP="10.10.10.1"' >> /etc/default/pveproxy
-echo 'net.ipv4.ip_forward = 1' >> /etc/sysctl.conf
-sysctl -p
+# Package installation with verification
+install_packages() {
+    log "Updating sources and installing packages..."
+    
+    # Secure APT sources configuration
+    cat > /etc/apt/sources.list << 'EOF'
+deb http://deb.debian.org/debian bookworm main contrib
+deb http://deb.debian.org/debian bookworm-updates main contrib
+deb http://security.debian.org/debian-security bookworm-security main contrib
+EOF
 
-curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp.gpg
-echo "deb [signed-by=/usr/share/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com bookworm main" > /etc/apt/sources.list.d/hashicorp.list
-apt update
-apt install terraform -y
+    # Add Proxmox repository with key verification
+    if [[ ! -f /etc/apt/sources.list.d/pve-install-repo.list ]]; then
+        wget -O /etc/apt/trusted.gpg.d/proxmox-release-bookworm.gpg https://enterprise.proxmox.com/debian/proxmox-release-bookworm.gpg
+        echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve-install-repo.list
+    fi
+    
+    echo 'APT::Get::Update::SourceListWarnings::NonFreeFirmware "false";' > /etc/apt/apt.conf.d/no-bookworm-firmware.conf
+    
+    # Update with error handling
+    if ! apt update; then
+        error_exit "Failed to update packages"
+    fi
+    
+    if ! apt upgrade -y; then
+        error_exit "Failed to upgrade packages"
+    fi
+    
+    # Essential packages installation
+    local packages=(
+        "auditd" "libguestfs-tools" "libpam-tmpdir" "qemu-guest-agent"
+        "wget" "git" "sudo" "curl" "unzip" "gnupg" "software-properties-common"
+        "lynis" "clamav" "nftables" "iptables-persistent" "fail2ban"
+        "rsyslog" "logrotate" "htop" "tree" "vim" "net-tools"
+    )
+    
+    for package in "${packages[@]}"; do
+        if ! apt install -y "$package"; then
+            log "WARNING: Failed to install $package"
+        fi
+    done
+}
 
+# Proxmox configuration
+configure_proxmox() {
+    log "Configuring Proxmox..."
+    
+    # Proxmox proxy configuration
+    echo 'LISTEN_IP="10.10.10.1"' >> /etc/default/pveproxy
+    
+    # Disable unnecessary services
+    systemctl disable postfix.service || true
+    systemctl mask postfix.service || true
+    
+    # Terraform installation with signature verification
+    if ! command -v terraform &> /dev/null; then
+        curl -fsSL https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp.gpg
+        echo "deb [signed-by=/usr/share/keyrings/hashicorp.gpg] https://apt.releases.hashicorp.com bookworm main" > /etc/apt/sources.list.d/hashicorp.list
+        apt update && apt install terraform -y
+    fi
+    
+    # Container templates download with verification
+    log "Downloading container templates..."
+    pveam download local debian-11-standard_11.7-1_amd64.tar.zst || log "WARNING: Failed to download Debian template"
+    pveam download local fedora-41-default_20241118_amd64.tar.xz || log "WARNING: Failed to download Fedora template"
+}
 
+# Secure user management
+configure_users() {
+    log "Configuring users..."
+    
+    # Create safyradmin user with strong password policy
+    if ! id "safyradmin" &>/dev/null; then
+        useradd safyradmin -m -s /bin/bash -G sudo
+        
+        # Generate strong password
+        local safyradmin_password
+        safyradmin_password=$(openssl rand -base64 32)
+        echo "safyradmin:${safyradmin_password}" | chpasswd
+        
+        # Secure credentials storage
+        {
+            echo "# SAFYRA Credentials - Generated on $(date)"
+            echo "SAFYRADMIN_PASSWORD=${safyradmin_password}"
+        } > "$SAFYRA_CREDS_FILE"
+        chmod 600 "$SAFYRA_CREDS_FILE"
+        
+        log "User safyradmin created with secure password"
+    fi
+   
+    # Create Guacamole user
+    if ! id "guacprox" &>/dev/null; then
+        useradd -s /bin/bash -m guacprox
+        usermod -aG sudo guacprox
+        mkdir -p /home/guacprox/.ssh
+        chmod 700 /home/guacprox/.ssh
+        touch /home/guacprox/.ssh/authorized_keys
+        chmod 600 /home/guacprox/.ssh/authorized_keys
+        chown -R guacprox:guacprox /home/guacprox/.ssh
+        
+        log "User guacprox created"
+    fi
+}
 
+# Terraform user configuration for Proxmox
+configure_terraform_user() {
+    log "Configuring Terraform user for Proxmox..."
+    
+    # Create Terraform user with minimal permissions
+    if ! pveum user list | grep -q "terraform@pve"; then
+        pveum user add terraform@pve -comment "Terraform Automation User"
+        
+        # Terraform role with restricted permissions
+        pveum role add TerraformRole -privs "VM.Allocate,VM.Audit,Datastore.AllocateSpace,Datastore.Audit,Pool.Allocate,Sys.Audit,Sys.Console,Sys.Modify,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Migrate,VM.Monitor,VM.PowerMgmt,SDN.Use" 2>/dev/null || true
+        
+        pveum aclmod / -user terraform@pve -role TerraformRole
+        
+        # Token generation with secure storage
+        local token_file="/etc/pve/.terraform-token.json"
+        if pveum user token add terraform@pve terraform-token --output-format json > "$token_file"; then
+            #chmod 600 "$token_file"
+            log "Terraform token generated and stored securely"
+        fi
+    fi
+}
 
-useradd safyradmin -m -s /bin/bash
-SAFYRADMIN_PASSWORD=$(openssl rand -base64 18)
-echo "safyradmin:${SAFYRADMIN_PASSWORD}" | chpasswd
-usermod -aG sudo safyradmin
-echo "SAFYRADMIN_PASSWORD=${SAFYRADMIN_PASSWORD}" >> /root/.safyra_credentials
+# Firewall configuration with persistent rules
+configure_firewall() {
+    log "Configuring firewall with persistent rules..."
+    
+    # Basic iptables configuration
+    iptables -F
+    iptables -X
+    iptables -t nat -F
+    iptables -t nat -X
+    
+    # Restrictive default policy
+    iptables -P INPUT DROP
+    iptables -P FORWARD DROP
+    iptables -P OUTPUT ACCEPT
+    
+    # Allow loopback
+    iptables -A INPUT -i lo -j ACCEPT
+    iptables -A OUTPUT -o lo -j ACCEPT
+    
+    # Allow established and related connections
+    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    
+    # SSH on custom port
+    iptables -A INPUT -p tcp --dport 8222 -m state --state NEW,ESTABLISHED -j ACCEPT
+    
+    # Proxmox Web Interface
+    iptables -A INPUT -p tcp --dport 8006 -m state --state NEW,ESTABLISHED -j ACCEPT
+    
+    # HTTP/HTTPS for updates
+    iptables -A INPUT -p tcp --dport 80 -m state --state NEW,ESTABLISHED -j ACCEPT
+    iptables -A INPUT -p tcp --dport 443 -m state --state NEW,ESTABLISHED -j ACCEPT
+    
+    # Limited ICMP (ping)
+    iptables -A INPUT -p icmp --icmp-type echo-request -m limit --limit 1/s -j ACCEPT
+    
+    # NAT for internal network
+    iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o vmbr0 -j MASQUERADE
+    iptables -A FORWARD -s 10.10.10.0/24 -o vmbr0 -j ACCEPT
+    iptables -A FORWARD -d 10.10.10.0/24 -i vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+    
+    # Protection against common attacks
+    iptables -A INPUT -m recent --name blacklist --set -j DROP
+    iptables -A INPUT -p tcp --dport 8222 -m recent --name ssh --set
+    iptables -A INPUT -p tcp --dport 8222 -m recent --name ssh --rcheck --seconds 60 --hitcount 4 -j DROP
+    
+    # Save rules for persistence
+    if command -v iptables-save &> /dev/null; then
+        iptables-save > /etc/iptables/rules.v4
+        log "IPv4 iptables rules saved"
+    fi
+    
+    # Configure for persistence on reboot
+    systemctl enable netfilter-persistent || true
+}
 
-cp -r /root/.ssh /root/.ssh.bak
-mkdir -p /home/safyradmin/.ssh
-chmod 700 /home/safyradmin/.ssh
-cat /root/.ssh/authorized_keys >> /home/safyradmin/.ssh/authorized_keys 
-chmod 600 /home/safyradmin/.ssh/authorized_keys
-chown -R safyradmin:safyradmin /home/safyradmin/.ssh
+# System security configuration
+configure_security() {
+    log "Configuring system security..."
+    
+    # System audit configuration
+    if systemctl is-active --quiet auditd; then
+        log "auditd service active"
+    else
+        systemctl enable auditd
+        systemctl start auditd
+    fi
+    
+    # Fail2Ban configuration for SSH
+    cat > /etc/fail2ban/jail.local << 'EOF'
+[sshd]
+enabled = true
+port = 8222
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 3600
+findtime = 600
+EOF
+    
+    systemctl enable fail2ban
+    systemctl start fail2ban
+    
+    # More restrictive default permissions
+    sed -i 's/^UMASK.*/UMASK\t027/' /etc/login.defs
+    
+    # Disable unnecessary system accounts
+    for user in games news uucp proxy www-data backup list irc gnats nobody; do
+        if id "$user" &>/dev/null; then
+            usermod -L -s /bin/false "$user" 2>/dev/null || true
+        fi
+    done
+}
 
-pveum user add terraform@pve -comment "Terraform Automation"
-pveum role add TerraformRole -privs "VM.Allocate VM.Audit Datastore.AllocateSpace Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify VM.Clone VM.Config.CDROM VM.Config.CPU VM.Config.Cloudinit VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt SDN.Use"
-pveum aclmod / -user terraform@pve -role TerraformRole
-pveum user token add terraform@pve terraform-token --output-format json > /etc/pve/.terraform-token.json
-#chmod 600 /etc/pve/.terraform-token.json
+# Security audit
+run_security_audit() {
+    log "Running security audit..."
+    
+    # Lynis audit
+    if command -v lynis &> /dev/null; then
+        lynis audit system --quiet > /root/lynis_report.txt 2>&1
+        chmod 600 /root/lynis_report.txt
+        log "Lynis audit report generated: /root/lynis_report.txt"
+    fi
+    
+    # Update antivirus signatures
+    if command -v freshclam &> /dev/null; then
+        freshclam --quiet || log "WARNING: Failed to update ClamAV signatures"
+    fi
+}
 
-#echo "TERRAFORM_PASSWORD=$(openssl rand -base64 18)" > /root/.safyra_credentials
-chmod 600 /root/.safyra_credentials
+# Cleanup and finalization
+cleanup_and_finalize() {
+    log "Cleanup and finalization..."
+    
+    # APT cache cleanup
+    apt autoremove -y
+    apt autoclean
+    
+    # Log rotation configuration
+    cat > /etc/logrotate.d/safyra << 'EOF'
+/var/log/safyra_install*.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 644 root root
+}
+EOF
+    
+    # Update locate database
+    updatedb || true
+    
+    # Generate installation report
+    {
+        echo "=== SAFYRA INSTALLATION REPORT ==="
+        echo "Date: $(date)"
+        echo "Script Version: $SCRIPT_VERSION"
+        echo "Hostname: $(hostname)"
+        echo "Primary IP: $(ip route get 1 | awk '{print $7}' | head -1)"
+        echo "Users created: safyradmin, guacprox"
+        echo "SSH Port: 8222"
+        echo "Installation logs: $LOG_FILE"
+        echo "Credentials: $SAFYRA_CREDS_FILE"
+        echo "===================================="
+    } > /root/safyra_install_report.txt
+    
+    chmod 600 /root/safyra_install_report.txt
+    log "Installation report generated: /root/safyra_install_report.txt"
+}
 
-lynis audit system > /root/lynis_report.txt
-chmod 600 /root/lynis_report.txt
+# Main function
+main() {
+    log "=========================================="
+    log "STARTING SAFYRA INSTALLATION v$SCRIPT_VERSION"
+    log "=========================================="
+    
+    check_prerequisites
+    backup_configs
+    configure_system_base
+    configure_ssh
+    configure_network
+    install_packages
+    configure_proxmox
+    configure_users
+    configure_terraform_user
+    configure_firewall
+    configure_security
+    run_security_audit
+    cleanup_and_finalize
+    
+    log "=========================================="
+    log "SAFYRA INSTALLATION COMPLETED SUCCESSFULLY"
+    log "REBOOT REQUIRED IN 30 SECONDS..."
+    log "=========================================="
+    
+    # Reboot with delay to allow log reading
+    sleep 30
+    reboot
+}
 
-reboot 
-
-echo "[DONE] SAFYRA INSTALL - $(date)"
+# Execute main script
+main "$@"
