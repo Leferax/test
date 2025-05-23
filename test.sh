@@ -87,15 +87,15 @@ configure_ssh() {
     # More secure SSH configuration
     sed -i \
         -e 's/^#Port .*/Port 8222/' \
-        -e 's/^#PermitRootLogin .*/PermitRootLogin prohibit-password/' \
+#        -e 's/^#PermitRootLogin .*/PermitRootLogin prohibit-password/' \
         -e 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' \
-        -e 's/^#PasswordAuthentication .*/PasswordAuthentication no/' \
+#        -e 's/^#PasswordAuthentication .*/PasswordAuthentication no/' \
         -e 's|^#AuthorizedKeysFile.*|AuthorizedKeysFile .ssh/authorized_keys|' \
         -e 's/^#LogLevel .*/LogLevel VERBOSE/' \
         -e 's|^#Subsystem\s\+sftp.*|Subsystem sftp /usr/libexec/openssh/sftp-server|' \
-        -e 's/^#MaxAuthTries .*/MaxAuthTries 3/' \
+        -e 's/^#MaxAuthTries .*/MaxAuthTries 5/' \
         -e 's/^#ClientAliveInterval .*/ClientAliveInterval 300/' \
-        -e 's/^#ClientAliveCountMax .*/ClientAliveCountMax 2/' \
+        -e 's/^#ClientAliveCountMax .*/ClientAliveCountMax 3/' \
         /etc/ssh/sshd_config
     
     # Additional security configurations
@@ -136,9 +136,7 @@ configure_network() {
     # DNS configuration with fallback
     cat > /etc/resolv.conf << 'EOF'
 nameserver 9.9.9.9
-nameserver 149.112.112.112
-nameserver 8.8.8.8
-options timeout:2 attempts:3
+options timeout:5 attempts:9
 EOF
     
     # Make resolv.conf immutable to prevent overwriting
