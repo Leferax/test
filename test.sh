@@ -42,7 +42,21 @@ check_prerequisites() {
         error_exit "Insufficient disk space (minimum 5GB required)"
     fi
 }
-
+# Critical configuration backup function
+backup_configs() {
+    log "Backing up critical configurations..."
+    local backup_dir="/root/safyra_backup_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$backup_dir"
+    
+    # Backup important configurations
+    [[ -f /etc/ssh/sshd_config ]] && cp /etc/ssh/sshd_config "$backup_dir/"
+    [[ -f /etc/network/interfaces ]] && cp /etc/network/interfaces "$backup_dir/"
+    [[ -d /etc/apt/sources.list.d ]] && cp -r /etc/apt/sources.list.d "$backup_dir/"
+    [[ -f /etc/resolv.conf ]] && cp /etc/resolv.conf "$backup_dir/"
+    [[ -f /etc/hosts ]] && cp /etc/hosts "$backup_dir/"
+    
+    log "Backup created in: $backup_dir"
+}
 # Critical configuration backup function# Enhanced secure SSH configuration
 # Enhanced secure SSH configuration
 configure_ssh() {
