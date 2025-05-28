@@ -43,18 +43,53 @@ check_prerequisites() {
     fi
 }
 
-# Critical configuration backup function
-backup_configs() {
-    log "Backing up critical configurations..."
-    local backup_dir="/root/safyra_backup_$(date +%Y%m%d_%H%M%S)"
-    mkdir -p "$backup_dir"
+# Critical configuration backup function# Enhanced secure SSH configuration
+# Enhanced secure SSH configuration
+configure_ssh() {
+    log "Configuring secure SSH..."
     
-    # Backup important configurations
-    [[ -f /etc/ssh/sshd_config ]] && cp /etc/ssh/sshd_config "$backup_dir/"
-    [[ -f /etc/network/interfaces ]] && cp /etc/network/interfaces "$backup_dir/"
-    [[ -d /etc/apt/sources.list.d ]] && cp -r /etc/apt/sources.list.d "$backup_dir/"
+    # Backup current SSH configuration
+    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d)
     
-    log "Backup created in: $backup_dir"
+    # More secure SSH configuration - CORRECTED VERSION
+    sed -i 's/^#Port .*/Port 8222/' /etc/ssh/sshd_config
+    sed -i 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+    sed -i 's|^#AuthorizedKeysFile.*|AuthorizedKeysFile .ssh/authorized_keys|' /etc/ssh/sshd_config
+    sed -i 's/^#LogLevel .*/LogLevel VERBOSE/' /etc/ssh/sshd_config
+    sed -i 's|^#Subsystem\s\+sftp.*|Subsystem sftp /usr/libexec/openssh/sftp-server|' /etc/ssh/sshd_config
+    sed -i 's/^#MaxAuthTries .*/MaxAuthTries 5/' /etc/ssh/sshd_config
+    sed -i 's/^#ClientAliveInterval .*/ClientAliveInterval 300/' /etc/ssh/sshd_config
+    sed -i 's/^#ClientAliveCountMax .*/ClientAliveCountMax 3/' /etc/ssh/sshd_config
+    
+    # Additional security configurations
+    cat >> /etc/ssh/sshd_config << 'EOF'
+
+# SAFYRA security configurations
+Protocol 2
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+PermitTunnel no
+PermitUserEnvironment no
+Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes256-ctr
+MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
+KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group16-sha512
+EOF
+    
+    # Remove cloud-init config file that may interfere
+    rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf
+    
+    # Security banner configuration
+    echo "WARNING: Unauthorized access is strictly prohibited. All connections are monitored and logged." > /etc/issue.net
+    echo "Banner /etc/issue.net" >> /etc/ssh/sshd_config
+    
+    # Test SSH configuration before restart
+    if sshd -t; then
+        systemctl restart ssh
+        log "SSH configuration applied successfully"
+    else
+        error_exit "Error in SSH configuration"
+    fi
 }
 
 # Enhanced base system configuration
