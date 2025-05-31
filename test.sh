@@ -97,8 +97,8 @@ configure_ssh() {
     sed -i 's/^#ClientAliveCountMax .*/ClientAliveCountMax 3/' /etc/ssh/sshd_config
     
     # Optional: Uncomment these lines if you want to disable root login and password authentication
-    # sed -i 's/^#PermitRootLogin .*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
-    # sed -i 's/^#PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
+     sed -i 's/^#PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
+     sed -i 's/^#PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
     
     # Additional security configurations
     cat >> /etc/ssh/sshd_config << 'EOF'
