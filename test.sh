@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail  # Enhanced security: add -u and -o pipefail for better error handling
+set -euo pipefail
 
 # Global configuration variables
 SCRIPT_VERSION="2.0"
@@ -42,6 +42,7 @@ check_prerequisites() {
         error_exit "Insufficient disk space (minimum 5GB required)"
     fi
 }
+
 # Critical configuration backup function
 backup_configs() {
     log "Backing up critical configurations..."
@@ -56,54 +57,6 @@ backup_configs() {
     [[ -f /etc/hosts ]] && cp /etc/hosts "$backup_dir/"
     
     log "Backup created in: $backup_dir"
-}
-# Critical configuration backup function# Enhanced secure SSH configuration
-# Enhanced secure SSH configuration
-configure_ssh() {
-    log "Configuring secure SSH..."
-    
-    # Backup current SSH configuration
-    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d)
-    
-    # More secure SSH configuration - CORRECTED VERSION
-    sed -i 's/^#Port .*/Port 8222/' /etc/ssh/sshd_config
-    sed -i 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-    sed -i 's|^#AuthorizedKeysFile.*|AuthorizedKeysFile .ssh/authorized_keys|' /etc/ssh/sshd_config
-    sed -i 's/^#LogLevel .*/LogLevel VERBOSE/' /etc/ssh/sshd_config
-    sed -i 's|^#Subsystem\s\+sftp.*|Subsystem sftp /usr/libexec/openssh/sftp-server|' /etc/ssh/sshd_config
-    sed -i 's/^#MaxAuthTries .*/MaxAuthTries 5/' /etc/ssh/sshd_config
-    sed -i 's/^#ClientAliveInterval .*/ClientAliveInterval 300/' /etc/ssh/sshd_config
-    sed -i 's/^#ClientAliveCountMax .*/ClientAliveCountMax 3/' /etc/ssh/sshd_config
-    
-    # Additional security configurations
-    cat >> /etc/ssh/sshd_config << 'EOF'
-
-# SAFYRA security configurations
-Protocol 2
-X11Forwarding no
-AllowTcpForwarding no
-AllowAgentForwarding no
-PermitTunnel no
-PermitUserEnvironment no
-Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes256-ctr
-MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
-KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group16-sha512
-EOF
-    
-    # Remove cloud-init config file that may interfere
-    rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf
-    
-    # Security banner configuration
-    echo "WARNING: Unauthorized access is strictly prohibited. All connections are monitored and logged." > /etc/issue.net
-    echo "Banner /etc/issue.net" >> /etc/ssh/sshd_config
-    
-    # Test SSH configuration before restart
-    if sshd -t; then
-        systemctl restart ssh
-        log "SSH configuration applied successfully"
-    else
-        error_exit "Error in SSH configuration"
-    fi
 }
 
 # Enhanced base system configuration
@@ -126,26 +79,26 @@ configure_system_base() {
     fi
 }
 
-# Enhanced secure SSH configuration
+# Enhanced secure SSH configuration (CORRECTED VERSION)
 configure_ssh() {
     log "Configuring secure SSH..."
     
     # Backup current SSH configuration
     cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d)
     
-    # More secure SSH configuration
-    sed -i \
-        -e 's/^#Port .*/Port 8222/' \
-#        -e 's/^#PermitRootLogin .*/PermitRootLogin prohibit-password/' \
-        -e 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' \
-#        -e 's/^#PasswordAuthentication .*/PasswordAuthentication no/' \
-        -e 's|^#AuthorizedKeysFile.*|AuthorizedKeysFile .ssh/authorized_keys|' \
-        -e 's/^#LogLevel .*/LogLevel VERBOSE/' \
-        -e 's|^#Subsystem\s\+sftp.*|Subsystem sftp /usr/libexec/openssh/sftp-server|' \
-        -e 's/^#MaxAuthTries .*/MaxAuthTries 5/' \
-        -e 's/^#ClientAliveInterval .*/ClientAliveInterval 300/' \
-        -e 's/^#ClientAliveCountMax .*/ClientAliveCountMax 3/' \
-        /etc/ssh/sshd_config
+    # Apply SSH configurations one by one for better error handling
+    sed -i 's/^#Port .*/Port 8222/' /etc/ssh/sshd_config
+    sed -i 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+    sed -i 's|^#AuthorizedKeysFile.*|AuthorizedKeysFile .ssh/authorized_keys|' /etc/ssh/sshd_config
+    sed -i 's/^#LogLevel .*/LogLevel VERBOSE/' /etc/ssh/sshd_config
+    sed -i 's|^#Subsystem\s\+sftp.*|Subsystem sftp /usr/lib/openssh/sftp-server|' /etc/ssh/sshd_config
+    sed -i 's/^#MaxAuthTries .*/MaxAuthTries 5/' /etc/ssh/sshd_config
+    sed -i 's/^#ClientAliveInterval .*/ClientAliveInterval 300/' /etc/ssh/sshd_config
+    sed -i 's/^#ClientAliveCountMax .*/ClientAliveCountMax 3/' /etc/ssh/sshd_config
+    
+    # Optional: Uncomment these lines if you want to disable root login and password authentication
+    # sed -i 's/^#PermitRootLogin .*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+    # sed -i 's/^#PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
     
     # Additional security configurations
     cat >> /etc/ssh/sshd_config << 'EOF'
