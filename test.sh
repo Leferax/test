@@ -79,7 +79,7 @@ configure_system_base() {
     fi
 }
 
-# Enhanced secure SSH configuration (CORRECTED VERSION)
+# Enhanced secure SSH configuration - Keep root password access
 configure_ssh() {
     log "Configuring secure SSH..."
     
@@ -87,18 +87,22 @@ configure_ssh() {
     cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup.$(date +%Y%m%d)
     
     # Apply SSH configurations one by one for better error handling
-    sed -i 's/^#Port .*/Port 8222/' /etc/ssh/sshd_config
-    #sed -i 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-    sed -i 's|^#AuthorizedKeysFile.*|AuthorizedKeysFile .ssh/authorized_keys|' /etc/ssh/sshd_config
-    sed -i 's/^#LogLevel .*/LogLevel VERBOSE/' /etc/ssh/sshd_config
-    sed -i 's|^#Subsystem\s\+sftp.*|Subsystem sftp /usr/lib/openssh/sftp-server|' /etc/ssh/sshd_config
-    sed -i 's/^#MaxAuthTries .*/MaxAuthTries 5/' /etc/ssh/sshd_config
-    sed -i 's/^#ClientAliveInterval .*/ClientAliveInterval 300/' /etc/ssh/sshd_config
-    sed -i 's/^#ClientAliveCountMax .*/ClientAliveCountMax 3/' /etc/ssh/sshd_config
+    sed -i 's/^#\?Port .*/Port 8222/' /etc/ssh/sshd_config
+    sed -i 's/^#\?PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+    sed -i 's|^#\?AuthorizedKeysFile.*|AuthorizedKeysFile .ssh/authorized_keys|' /etc/ssh/sshd_config
+    sed -i 's/^#\?LogLevel .*/LogLevel VERBOSE/' /etc/ssh/sshd_config
+    sed -i 's|^#\?Subsystem\s\+sftp.*|Subsystem sftp /usr/lib/openssh/sftp-server|' /etc/ssh/sshd_config
+    sed -i 's/^#\?MaxAuthTries .*/MaxAuthTries 5/' /etc/ssh/sshd_config
+    sed -i 's/^#\?ClientAliveInterval .*/ClientAliveInterval 300/' /etc/ssh/sshd_config
+    sed -i 's/^#\?ClientAliveCountMax .*/ClientAliveCountMax 3/' /etc/ssh/sshd_config
     
-    # Optional: Uncomment these lines if you want to disable root login and password authentication
-     sed -i 's/^#PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
-     sed -i 's/^#PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    # IMPORTANT: Ensure root login with password is allowed
+    sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
+    sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    
+    # If the lines don't exist, add them
+    grep -q "^PermitRootLogin" /etc/ssh/sshd_config || echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
+    grep -q "^PasswordAuthentication" /etc/ssh/sshd_config || echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
     
     # Additional security configurations
     cat >> /etc/ssh/sshd_config << 'EOF'
@@ -113,10 +117,18 @@ PermitUserEnvironment no
 Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes256-ctr
 MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
 KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group16-sha512
+
+# Ensure password authentication stays enabled
+PasswordAuthentication yes
+PermitRootLogin yes
 EOF
     
     # Remove cloud-init config file that may interfere
     rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf
+    
+    # IMPORTANT: Remove any drop-in files that might override our settings
+    rm -f /etc/ssh/sshd_config.d/*-no-password.conf
+    rm -f /etc/ssh/sshd_config.d/*-disable-root.conf
     
     # Security banner configuration
     echo "WARNING: Unauthorized access is strictly prohibited. All connections are monitored and logged." > /etc/issue.net
@@ -126,6 +138,7 @@ EOF
     if sshd -t; then
         systemctl restart ssh
         log "SSH configuration applied successfully"
+        log "Root login with password is ENABLED on port 8222"
     else
         error_exit "Error in SSH configuration"
     fi
