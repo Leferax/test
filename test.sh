@@ -88,7 +88,7 @@ configure_ssh() {
     
     # Apply SSH configurations one by one for better error handling
     sed -i 's/^#Port .*/Port 8222/' /etc/ssh/sshd_config
-    sed -i 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+    #sed -i 's/^#PubkeyAuthentication .*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
     sed -i 's|^#AuthorizedKeysFile.*|AuthorizedKeysFile .ssh/authorized_keys|' /etc/ssh/sshd_config
     sed -i 's/^#LogLevel .*/LogLevel VERBOSE/' /etc/ssh/sshd_config
     sed -i 's|^#Subsystem\s\+sftp.*|Subsystem sftp /usr/lib/openssh/sftp-server|' /etc/ssh/sshd_config
