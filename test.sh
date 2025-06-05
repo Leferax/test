@@ -143,7 +143,6 @@ EOF
         error_exit "Error in SSH configuration"
     fi
 }
-
 # Enhanced network configuration
 configure_network() {
     log "Configuring network..."
