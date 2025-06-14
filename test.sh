@@ -2,11 +2,14 @@
 set -euo pipefail
 
 # Global configuration variables
-SCRIPT_VERSION="2.0"
-SCRIPT_NAME="SAFYRA Install"
+SCRIPT_VERSION="2.1"
+SCRIPT_NAME="SAFYRA Install Enhanced"
 LOG_FILE="/var/log/safyra_install.log"
 ERROR_LOG="/var/log/safyra_install_errors.log"
 SAFYRA_CREDS_FILE="/root/.safyra_credentials"
+BASTION_HOST="preprod.safyra.io"
+BASTION_PORT="2222"
+BASTION_USER="safyradmin"
 
 # Secure logging configuration
 exec > >(tee -a "${LOG_FILE}") 2> >(tee -a "${ERROR_LOG}" >&2)
@@ -36,10 +39,10 @@ check_prerequisites() {
         log "WARNING: This script is optimized for Debian Bookworm"
     fi
     
-    # Check available disk space (minimum 5GB)
+    # Check available disk space (minimum 20GB for Proxmox + VMs)
     AVAILABLE_SPACE=$(df / | awk 'NR==2 {print $4}')
-    if [[ $AVAILABLE_SPACE -lt 5242880 ]]; then
-        error_exit "Insufficient disk space (minimum 5GB required)"
+    if [[ $AVAILABLE_SPACE -lt 20971520 ]]; then
+        error_exit "Insufficient disk space (minimum 20GB required for Proxmox + VMs)"
     fi
 }
 
@@ -100,9 +103,20 @@ configure_ssh() {
     sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
     sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
     
+    # SSH Forwarding configuration for bastion functionality
+    sed -i 's/^#\?AllowTcpForwarding .*/AllowTcpForwarding yes/' /etc/ssh/sshd_config
+    sed -i 's/^#\?AllowAgentForwarding .*/AllowAgentForwarding yes/' /etc/ssh/sshd_config
+    sed -i 's/^#\?PermitTunnel .*/PermitTunnel yes/' /etc/ssh/sshd_config
+    sed -i 's/^#\?GatewayPorts .*/GatewayPorts no/' /etc/ssh/sshd_config
+    
     # If the lines don't exist, add them
     grep -q "^PermitRootLogin" /etc/ssh/sshd_config || echo "PermitRootLogin yes" >> /etc/ssh/sshd_config
     grep -q "^PasswordAuthentication" /etc/ssh/sshd_config || echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
+    grep -q "^AllowTcpForwarding" /etc/ssh/sshd_config || echo "AllowTcpForwarding yes" >> /etc/ssh/sshd_config
+    grep -q "^AllowAgentForwarding" /etc/ssh/sshd_config || echo "AllowAgentForwarding yes" >> /etc/ssh/sshd_config
+    grep -q "^PermitTunnel" /etc/ssh/sshd_config || echo "PermitTunnel yes" >> /etc/ssh/sshd_config
+    grep -q "^GatewayPorts" /etc/ssh/sshd_config || echo "GatewayPorts no" >> /etc/ssh/sshd_config
+    grep -q "^AllowStreamLocalForwarding" /etc/ssh/sshd_config || echo "AllowStreamLocalForwarding yes" >> /etc/ssh/sshd_config
     
     # Additional security configurations
     cat >> /etc/ssh/sshd_config << 'EOF'
@@ -110,9 +124,6 @@ configure_ssh() {
 # SAFYRA security configurations
 Protocol 2
 X11Forwarding no
-AllowTcpForwarding no
-AllowAgentForwarding no
-PermitTunnel no
 PermitUserEnvironment no
 Ciphers aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes256-ctr
 MACs hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
@@ -121,6 +132,13 @@ KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group16-sha512
 # Ensure password authentication stays enabled
 PasswordAuthentication yes
 PermitRootLogin yes
+
+# Bastion functionality
+AllowTcpForwarding yes
+AllowAgentForwarding yes
+PermitTunnel yes
+GatewayPorts no
+AllowStreamLocalForwarding yes
 EOF
     
     # Remove cloud-init config file that may interfere
@@ -143,6 +161,7 @@ EOF
         error_exit "Error in SSH configuration"
     fi
 }
+
 # Enhanced network configuration
 configure_network() {
     log "Configuring network..."
@@ -160,7 +179,7 @@ EOF
     if ! grep -q "vmbr1" /etc/network/interfaces; then
         cat >> /etc/network/interfaces << 'EOF'
 
-# SAFYRA bridge interface
+# SAFYRA bridge interface for internal VMs
 auto vmbr1
 iface vmbr1 inet static
     address 10.10.10.1/24
@@ -207,12 +226,13 @@ EOF
         error_exit "Failed to upgrade packages"
     fi
     
-    # Essential packages installation
+    # Essential packages installation (including nginx for bastion proxy)
     local packages=(
         "auditd" "libguestfs-tools" "libpam-tmpdir" "qemu-guest-agent"
         "wget" "git" "sudo" "curl" "unzip" "gnupg" "software-properties-common"
         "lynis" "clamav" "nftables" "iptables-persistent" "fail2ban"
         "rsyslog" "logrotate" "htop" "tree" "vim" "net-tools"
+        "nginx" "socat"
     )
     
     for package in "${packages[@]}"; do
@@ -246,7 +266,26 @@ configure_proxmox() {
     pveam download local fedora-41-default_20241118_amd64.tar.xz || log "WARNING: Failed to download Fedora template"
 }
 
-# Secure user management
+# Enhanced SSH key management
+setup_ssh_keys() {
+    log "Setting up SSH keys..."
+    
+    # Create .ssh directories if they don't exist
+    mkdir -p /root/.ssh
+    chmod 700 /root/.ssh
+    
+    # SSH key for f4ku user (from paste.txt)
+    local f4ku_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDhTyqkUMet5mqtBGTNQhsMerolGh9jcXjX9LteAGvCjD2ZbCav7RA6CTUySHrs+tIL6MNMnyK8E5w6bx/FWTkPnB/CW7TPtVE3TOAnVYm3E2Bys5ZSXh/HH7uG9pKpjAvBXWSaXDgXbcb33u4z1/UP+5ABa73gZfWju0tKdIReUmVjRHi20r+/rta3ujQfn91o+QVrWR3Khsp80M1pSqkABlGbfupZaAhlnM7B82yWvCYq62r4fVaKbFkKfwmfOtW6UlkhWgd5NT1DxCSnCbOFRaKv0EsUDtaae8e7U9LSfBFmYBGLdGuo5jL9IZpssIPL4v8iFjJbFW/wEYakMygfPzt2droXlIhUxSIoBmjJ3paj5egi3mF6CRVIqilvmxMsOeCYdjoo1A/4txQmWwD6zCajm+9b/Iy0h0pMUgpE61sddnkWjChjU73YrKkjJGLF0fzTmKPkGxnQPE1/TQqq06diPyV7UFk1QKgjs+teJZ5l07Lo3sY+SN5BR0azpVM= f4ku@fedora"
+    
+    # Add key to root's authorized_keys if not already present
+    if [[ ! -f /root/.ssh/authorized_keys ]] || ! grep -q "$f4ku_key" /root/.ssh/authorized_keys; then
+        echo "$f4ku_key" >> /root/.ssh/authorized_keys
+        chmod 600 /root/.ssh/authorized_keys
+        log "SSH key added to root authorized_keys"
+    fi
+}
+
+# Secure user management with SSH keys
 configure_users() {
     log "Configuring users..."
     
@@ -259,14 +298,27 @@ configure_users() {
         safyradmin_password=$(openssl rand -base64 32)
         echo "safyradmin:${safyradmin_password}" | chpasswd
         
+        # Setup SSH directory and keys for safyradmin
+        mkdir -p /home/safyradmin/.ssh
+        chmod 700 /home/safyradmin/.ssh
+        
+        # Copy the same SSH key to safyradmin
+        local f4ku_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDhTyqkUMet5mqtBGTNQhsMerolGh9jcXjX9LteAGvCjD2ZbCav7RA6CTUySHrs+tIL6MNMnyK8E5w6bx/FWTkPnB/CW7TPtVE3TOAnVYm3E2Bys5ZSXh/HH7uG9pKpjAvBXWSaXDgXbcb33u4z1/UP+5ABa73gZfWju0tKdIReUmVjRHi20r+/rta3ujQfn91o+QVrWR3Khsp80M1pSqkABlGbfupZaAhlnM7B82yWvCYq62r4fVaKbFkKfwmfOtW6UlkhWgd5NT1DxCSnCbOFRaKv0EsUDtaae8e7U9LSfBFmYBGLdGuo5jL9IZpssIPL4v8iFjJbFW/wEYakMygfPzt2droXlIhUxSIoBmjJ3paj5egi3mF6CRVIqilvmxMsOeCYdjoo1A/4txQmWwD6zCajm+9b/Iy0h0pMUgpE61sddnkWjChjU73YrKkjJGLF0fzTmKPkGxnQPE1/TQqq06diPyV7UFk1QKgjs+teJZ5l07Lo3sY+SN5BR0azpVM= f4ku@fedora"
+        echo "$f4ku_key" > /home/safyradmin/.ssh/authorized_keys
+        chmod 600 /home/safyradmin/.ssh/authorized_keys
+        chown -R safyradmin:safyradmin /home/safyradmin/.ssh
+        
         # Secure credentials storage
         {
             echo "# SAFYRA Credentials - Generated on $(date)"
             echo "SAFYRADMIN_PASSWORD=${safyradmin_password}"
+            echo "BASTION_HOST=${BASTION_HOST}"
+            echo "BASTION_PORT=${BASTION_PORT}"
+            echo "BASTION_USER=${BASTION_USER}"
         } > "$SAFYRA_CREDS_FILE"
         chmod 600 "$SAFYRA_CREDS_FILE"
         
-        log "User safyradmin created with secure password"
+        log "User safyradmin created with secure password and SSH key"
     fi
    
     # Create Guacamole user
@@ -281,6 +333,74 @@ configure_users() {
         
         log "User guacprox created"
     fi
+}
+
+# VM Template creation and bastion setup
+setup_vm_infrastructure() {
+    log "Setting up VM infrastructure..."
+    
+    # Wait for Proxmox to be ready
+    sleep 30
+    
+    # Download Debian cloud image
+    cd /tmp
+    if [[ ! -f debian-12-generic-amd64.qcow2 ]]; then
+        wget https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2 || {
+            log "WARNING: Failed to download Debian cloud image"
+            return 1
+        }
+    fi
+    
+    # Create VM template if it doesn't exist
+    if ! qm list | grep -q "9000"; then
+        log "Creating Debian 12 cloud-init template..."
+        
+        # Create the template VM
+        qm create 9000 --name debian-12-cloudinit-template --memory 2048 --cores 2 --net0 virtio,bridge=vmbr1
+        
+        # Import disk
+        qm importdisk 9000 debian-12-generic-amd64.qcow2 local
+        
+        # Configure template
+        qm set 9000 --scsihw virtio-scsi-pci --scsi0 local:9000/vm-9000-disk-0.raw
+        qm set 9000 --ide2 local:cloudinit
+        qm set 9000 --boot c --bootdisk scsi0
+        qm set 9000 --serial0 socket --vga serial0
+        
+        # Convert to template
+        qm template 9000
+        
+        log "VM template 9000 created successfully"
+    fi
+    
+    # Create bastion VM if it doesn't exist
+    if ! qm list | grep -q "200"; then
+        log "Creating bastion VM..."
+        
+        # Clone template for bastion
+        qm clone 9000 200 --name bastion-safyra --full
+        
+        # Configure bastion VM
+        qm set 200 \
+            --memory 4096 \
+            --cores 2 \
+            --onboot 1 \
+            --ciuser ${BASTION_USER} \
+            --ipconfig0 ip=10.10.10.100/24,gw=10.10.10.1 \
+            --nameserver 9.9.9.9 \
+            --sshkeys /root/.ssh/authorized_keys
+        
+        # Resize disk to 32GB
+        qm resize 200 scsi0 32G
+        
+        # Start the VM
+        qm start 200
+        
+        log "Bastion VM 200 created and started"
+    fi
+    
+    # Clean up
+    rm -f /tmp/debian-12-generic-amd64.qcow2
 }
 
 # Terraform user configuration for Proxmox
@@ -299,15 +419,15 @@ configure_terraform_user() {
         # Token generation with secure storage
         local token_file="/etc/pve/.terraform-token.json"
         if pveum user token add terraform@pve terraform-token --output-format json > "$token_file"; then
-            #chmod 600 "$token_file"
+            chmod 600 "$token_file"
             log "Terraform token generated and stored securely"
         fi
     fi
 }
 
-# Firewall configuration with persistent rules
+# Enhanced firewall configuration with NAT rules for bastion
 configure_firewall() {
-    log "Configuring firewall with persistent rules..."
+    log "Configuring firewall with persistent rules and NAT for bastion..."
     
     # Basic iptables configuration
     iptables -F
@@ -340,10 +460,24 @@ configure_firewall() {
     # Limited ICMP (ping)
     iptables -A INPUT -p icmp --icmp-type echo-request -m limit --limit 1/s -j ACCEPT
     
-    # NAT for internal network
+    # NAT for internal network (general)
     iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o vmbr0 -j MASQUERADE
     iptables -A FORWARD -s 10.10.10.0/24 -o vmbr0 -j ACCEPT
     iptables -A FORWARD -d 10.10.10.0/24 -i vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+    
+    # NAT rules for bastion access
+    # SSH to bastion
+    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 2222 -j DNAT --to-destination 10.10.10.100:22
+    iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 22 -j ACCEPT
+    
+    # Web interfaces through bastion
+    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 8080 -j DNAT --to-destination 10.10.10.100:8080
+    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 8081 -j DNAT --to-destination 10.10.10.100:8081
+    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 8082 -j DNAT --to-destination 10.10.10.100:8082
+    
+    iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 8080 -j ACCEPT
+    iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 8081 -j ACCEPT
+    iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 8082 -j ACCEPT
     
     # Protection against common attacks
     iptables -A INPUT -m recent --name blacklist --set -j DROP
@@ -358,6 +492,146 @@ configure_firewall() {
     
     # Configure for persistence on reboot
     systemctl enable netfilter-persistent || true
+}
+
+# Configure Nginx as reverse proxy for bastion
+configure_nginx_proxy() {
+    log "Configuring Nginx reverse proxy..."
+    
+    # Create nginx configuration for VM proxy
+    cat > /etc/nginx/sites-available/vm-proxy << 'EOF'
+# Proxmox Web UI
+server {
+    listen 8080;
+    server_name _;
+
+    location / {
+        proxy_pass https://10.10.10.1:8006;
+        proxy_ssl_verify off;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # WebSocket support for Proxmox
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+    }
+}
+
+# Template for future VMs - example VM web on 10.10.10.101:80
+server {
+    listen 8081;
+    server_name _;
+
+    location / {
+        proxy_pass http://10.10.10.101:80;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# Template for VM with HTTPS interface - example on 10.10.10.102:443
+server {
+    listen 8082;
+    server_name _;
+
+    location / {
+        proxy_pass https://10.10.10.102:443;
+        proxy_ssl_verify off;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+    # Remove default nginx sites and enable our proxy
+    rm -f /etc/nginx/sites-enabled/*
+    ln -s /etc/nginx/sites-available/vm-proxy /etc/nginx/sites-enabled/
+    
+    # Test nginx configuration
+    if nginx -t; then
+        systemctl restart nginx
+        systemctl enable nginx
+        log "Nginx reverse proxy configured successfully"
+    else
+        log "WARNING: Nginx configuration test failed"
+    fi
+}
+
+# Generate SSH client configuration helper
+generate_ssh_config() {
+    log "Generating SSH client configuration..."
+    
+    cat > /root/generate-ssh-config.sh << EOF
+#!/bin/bash
+
+BASTION_HOST="${BASTION_HOST}"
+BASTION_PORT="${BASTION_PORT}"
+BASTION_USER="${BASTION_USER}"
+
+cat > /root/ssh-client-config << 'SSHEOF'
+# Configuration SSH pour Safyra
+# Copiez ce contenu dans votre fichier ~/.ssh/config
+
+Host safyra-bastion
+    HostName \$BASTION_HOST
+    Port \$BASTION_PORT
+    User \$BASTION_USER
+    # Tunnels automatiques vers les interfaces web
+    LocalForward 8080 localhost:8080  # Proxmox Web UI
+    LocalForward 8081 localhost:8081  # VM Web 1
+    LocalForward 8082 localhost:8082  # VM Web 2
+
+Host safyra-proxmox
+    HostName 10.10.10.1
+    Port 8222
+    User root
+    ProxyJump safyra-bastion
+
+# Alias rapides
+Host pve
+    HostName 10.10.10.1
+    Port 8222
+    User root
+    ProxyJump safyra-bastion
+
+Host bastion
+    HostName \$BASTION_HOST
+    Port \$BASTION_PORT
+    User \$BASTION_USER
+SSHEOF
+
+echo "Configuration SSH générée dans /root/ssh-client-config"
+echo ""
+echo "=== Instructions pour le client ==="
+echo "1. Téléchargez le fichier:"
+echo "   scp \${BASTION_USER}@\${BASTION_HOST}:/root/ssh-client-config ~/.ssh/config-safyra"
+echo ""
+echo "2. Ajoutez le contenu à votre ~/.ssh/config:"
+echo "   cat ~/.ssh/config-safyra >> ~/.ssh/config"
+echo ""
+echo "3. Connectez-vous avec les tunnels:"
+echo "   ssh safyra-bastion"
+echo ""
+echo "4. Accédez aux interfaces web:"
+echo "   http://localhost:8080  -> Proxmox"
+echo "   http://localhost:8081  -> VM Web 1"
+echo "   http://localhost:8082  -> VM Web 2"
+EOF
+
+    chmod +x /root/generate-ssh-config.sh
+    
+    # Generate the configuration immediately
+    /root/generate-ssh-config.sh
+    
+    log "SSH client configuration generated at /root/ssh-client-config"
 }
 
 # System security configuration
@@ -379,6 +653,14 @@ enabled = true
 port = 8222
 logpath = /var/log/auth.log
 maxretry = 3
+bantime = 3600
+findtime = 600
+
+[nginx-http-auth]
+enabled = true
+port = 8080,8081,8082
+logpath = /var/log/nginx/error.log
+maxretry = 5
 bantime = 3600
 findtime = 600
 EOF
@@ -414,6 +696,83 @@ run_security_audit() {
     fi
 }
 
+# Wait for bastion VM to be ready and configure it
+configure_bastion_vm() {
+    log "Waiting for bastion VM to be ready..."
+    
+    local max_attempts=60
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        if ping -c 1 10.10.10.100 &>/dev/null; then
+            log "Bastion VM is reachable"
+            break
+        fi
+        
+        log "Waiting for bastion VM... attempt $attempt/$max_attempts"
+        sleep 10
+        ((attempt++))
+    done
+    
+    if [[ $attempt -gt $max_attempts ]]; then
+        log "WARNING: Bastion VM did not become reachable within expected time"
+        return 1
+    fi
+    
+    # Wait a bit more for SSH to be ready
+    sleep 30
+    
+    # Create a script to configure the bastion VM
+    cat > /tmp/configure_bastion.sh << 'EOF'
+#!/bin/bash
+set -e
+
+# Update the system
+apt update && apt upgrade -y
+
+# Install essential packages
+apt install -y curl nginx wget git vim htop net-tools fail2ban ufw socat
+
+# The nginx configuration will be handled by the host's reverse proxy
+# Just ensure nginx is stopped on the bastion to avoid conflicts
+systemctl stop nginx
+systemctl disable nginx
+
+# Configure SSH to allow forwarding (should already be configured by cloud-init)
+if ! grep -q "AllowTcpForwarding yes" /etc/ssh/sshd_config; then
+    echo "AllowTcpForwarding yes" >> /etc/ssh/sshd_config
+    echo "AllowAgentForwarding yes" >> /etc/ssh/sshd_config
+    echo "PermitTunnel yes" >> /etc/ssh/sshd_config
+    echo "GatewayPorts no" >> /etc/ssh/sshd_config
+    echo "AllowStreamLocalForwarding yes" >> /etc/ssh/sshd_config
+    systemctl restart sshd
+fi
+
+# Configure basic firewall
+ufw --force enable
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 22/tcp
+ufw allow from 10.10.10.0/24
+
+echo "Bastion VM configuration completed"
+EOF
+
+    # Copy and execute the script on the bastion
+    if scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /tmp/configure_bastion.sh ${BASTION_USER}@10.10.10.100:/tmp/; then
+        if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BASTION_USER}@10.10.10.100 "sudo bash /tmp/configure_bastion.sh"; then
+            log "Bastion VM configured successfully"
+        else
+            log "WARNING: Failed to configure bastion VM"
+        fi
+    else
+        log "WARNING: Failed to copy configuration script to bastion VM"
+    fi
+    
+    # Clean up
+    rm -f /tmp/configure_bastion.sh
+}
+
 # Cleanup and finalization
 cleanup_and_finalize() {
     log "Cleanup and finalization..."
@@ -447,8 +806,21 @@ EOF
         echo "Primary IP: $(ip route get 1 | awk '{print $7}' | head -1)"
         echo "Users created: safyradmin, guacprox"
         echo "SSH Port: 8222"
+        echo "Bastion SSH Port: ${BASTION_PORT}"
+        echo "Bastion User: ${BASTION_USER}"
         echo "Installation logs: $LOG_FILE"
         echo "Credentials: $SAFYRA_CREDS_FILE"
+        echo "SSH Config Generator: /root/generate-ssh-config.sh"
+        echo "VM Template ID: 9000 (Debian 12 Cloud-Init)"
+        echo "Bastion VM ID: 200 (IP: 10.10.10.100)"
+        echo "===================================="
+        echo "Access Instructions:"
+        echo "1. SSH to bastion: ssh ${BASTION_USER}@${BASTION_HOST} -p ${BASTION_PORT}"
+        echo "2. SSH to Proxmox via bastion: ssh root@10.10.10.1 -p 8222 -o ProxyJump=${BASTION_USER}@${BASTION_HOST}:${BASTION_PORT}"
+        echo "3. Web access (via SSH tunnels):"
+        echo "   - Proxmox UI: http://localhost:8080"
+        echo "   - VM Web 1: http://localhost:8081"
+        echo "   - VM Web 2: http://localhost:8082"
         echo "===================================="
     } > /root/safyra_install_report.txt
     
@@ -465,6 +837,7 @@ main() {
     check_prerequisites
     backup_configs
     configure_system_base
+    setup_ssh_keys
     configure_ssh
     configure_network
     install_packages
@@ -472,17 +845,40 @@ main() {
     configure_users
     configure_terraform_user
     configure_firewall
+    configure_nginx_proxy
+    generate_ssh_config
     configure_security
+    
+    # VM setup (with error handling)
+    if setup_vm_infrastructure; then
+        log "VM infrastructure setup completed"
+        # Wait and configure bastion VM
+        sleep 60  # Give more time for VM to fully boot
+        configure_bastion_vm
+    else
+        log "WARNING: VM infrastructure setup failed, continuing without bastion VM"
+    fi
+    
     run_security_audit
     cleanup_and_finalize
     
     log "=========================================="
     log "SAFYRA INSTALLATION COMPLETED SUCCESSFULLY"
-    log "REBOOT REQUIRED IN 30 SECONDS..."
+    log "Check /root/safyra_install_report.txt for access instructions"
+    log "REBOOT REQUIRED IN 60 SECONDS..."
     log "=========================================="
     
+    # Display important information before reboot
+    echo ""
+    echo "=== IMPORTANT ACCESS INFORMATION ==="
+    echo "SSH to bastion: ssh ${BASTION_USER}@${BASTION_HOST} -p ${BASTION_PORT}"
+    echo "SSH config helper: /root/generate-ssh-config.sh"
+    echo "Credentials file: $SAFYRA_CREDS_FILE"
+    echo "Installation report: /root/safyra_install_report.txt"
+    echo "===================================="
+    
     # Reboot with delay to allow log reading
-    sleep 30
+    sleep 60
     reboot
 }
 
