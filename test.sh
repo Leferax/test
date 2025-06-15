@@ -39,10 +39,25 @@ check_prerequisites() {
         log "WARNING: This script is optimized for Debian Bookworm"
     fi
     
-    # Check available disk space (minimum 20GB for Proxmox + VMs)
-    AVAILABLE_SPACE=$(df / | awk 'NR==2 {print $4}')
-    if [[ $AVAILABLE_SPACE -lt 20971520 ]]; then
-        error_exit "Insufficient disk space (minimum 20GB required for Proxmox + VMs)"
+    # Check available disk space (minimum 10GB for Proxmox + basic VMs)
+    # Using df -BG to get space in GB for easier calculation
+    AVAILABLE_SPACE_GB=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
+    TOTAL_SPACE_GB=$(df -BG / | awk 'NR==2 {print $2}' | sed 's/G//')
+    
+    log "Available disk space: ${AVAILABLE_SPACE_GB}GB / ${TOTAL_SPACE_GB}GB total"
+    
+    if [[ $AVAILABLE_SPACE_GB -lt 10 ]]; then
+        error_exit "Insufficient disk space (minimum 10GB required, found ${AVAILABLE_SPACE_GB}GB available)"
+    else
+        log "Disk space check passed: ${AVAILABLE_SPACE_GB}GB available"
+    fi
+    
+    # Additional checks for Proxmox requirements
+    MEMORY_GB=$(free -g | awk 'NR==2{print $2}')
+    log "Available RAM: ${MEMORY_GB}GB"
+    
+    if [[ $MEMORY_GB -lt 4 ]]; then
+        log "WARNING: Less than 4GB RAM available. Proxmox may have performance issues."
     fi
 }
 
@@ -320,19 +335,6 @@ configure_users() {
         
         log "User safyradmin created with secure password and SSH key"
     fi
-   
-    # Create Guacamole user
-    if ! id "guacprox" &>/dev/null; then
-        useradd -s /bin/bash -m guacprox
-        usermod -aG sudo guacprox
-        mkdir -p /home/guacprox/.ssh
-        chmod 700 /home/guacprox/.ssh
-        touch /home/guacprox/.ssh/authorized_keys
-        chmod 600 /home/guacprox/.ssh/authorized_keys
-        chown -R guacprox:guacprox /home/guacprox/.ssh
-        
-        log "User guacprox created"
-    fi
 }
 
 # VM Template creation and bastion setup
@@ -419,7 +421,6 @@ configure_terraform_user() {
         # Token generation with secure storage
         local token_file="/etc/pve/.terraform-token.json"
         if pveum user token add terraform@pve terraform-token --output-format json > "$token_file"; then
-            chmod 600 "$token_file"
             log "Terraform token generated and stored securely"
         fi
     fi
@@ -804,7 +805,7 @@ EOF
         echo "Script Version: $SCRIPT_VERSION"
         echo "Hostname: $(hostname)"
         echo "Primary IP: $(ip route get 1 | awk '{print $7}' | head -1)"
-        echo "Users created: safyradmin, guacprox"
+        echo "Users created: safyradmin"
         echo "SSH Port: 8222"
         echo "Bastion SSH Port: ${BASTION_PORT}"
         echo "Bastion User: ${BASTION_USER}"
