@@ -203,7 +203,23 @@ iface vmbr1 inet static
     bridge-fd 0
     bridge-vlan-aware yes
 EOF
-        log "Bridge interface vmbr1 configured"
+        log "Bridge interface vmbr1 configured in /etc/network/interfaces"
+    fi
+    
+    # Create the bridge immediately if it doesn't exist
+    if ! ip link show vmbr1 &>/dev/null; then
+        log "Creating bridge vmbr1 immediately..."
+        ip link add name vmbr1 type bridge
+        ip addr add 10.10.10.1/24 dev vmbr1
+        ip link set vmbr1 up
+        
+        # Configure bridge properties
+        echo 0 > /sys/class/net/vmbr1/bridge/stp_state
+        echo 0 > /sys/class/net/vmbr1/bridge/forward_delay
+        
+        log "Bridge vmbr1 created and configured"
+    else
+        log "Bridge vmbr1 already exists"
     fi
     
     # IP forwarding configuration
@@ -577,14 +593,14 @@ BASTION_HOST="${BASTION_HOST}"
 BASTION_PORT="${BASTION_PORT}"
 BASTION_USER="${BASTION_USER}"
 
-cat > /root/ssh-client-config << 'SSHEOF'
+cat > /root/ssh-client-config << SSHEOF
 # Configuration SSH pour Safyra
 # Copiez ce contenu dans votre fichier ~/.ssh/config
 
 Host safyra-bastion
-    HostName \$BASTION_HOST
-    Port \$BASTION_PORT
-    User \$BASTION_USER
+    HostName \${BASTION_HOST}
+    Port \${BASTION_PORT}
+    User \${BASTION_USER}
     # Tunnels automatiques vers les interfaces web
     LocalForward 8080 localhost:8080  # Proxmox Web UI
     LocalForward 8081 localhost:8081  # VM Web 1
@@ -604,16 +620,16 @@ Host pve
     ProxyJump safyra-bastion
 
 Host bastion
-    HostName \$BASTION_HOST
-    Port \$BASTION_PORT
-    User \$BASTION_USER
+    HostName \${BASTION_HOST}
+    Port \${BASTION_PORT}
+    User \${BASTION_USER}
 SSHEOF
 
 echo "Configuration SSH générée dans /root/ssh-client-config"
 echo ""
 echo "=== Instructions pour le client ==="
 echo "1. Téléchargez le fichier:"
-echo "   scp \${BASTION_USER}@\${BASTION_HOST}:/root/ssh-client-config ~/.ssh/config-safyra"
+echo "   scp \${BASTION_USER}@\${BASTION_HOST}:\${BASTION_PORT}/root/ssh-client-config ~/.ssh/config-safyra"
 echo ""
 echo "2. Ajoutez le contenu à votre ~/.ssh/config:"
 echo "   cat ~/.ssh/config-safyra >> ~/.ssh/config"
@@ -629,8 +645,38 @@ EOF
 
     chmod +x /root/generate-ssh-config.sh
     
-    # Generate the configuration immediately
-    /root/generate-ssh-config.sh
+    # Generate the configuration immediately with proper variable substitution
+    cat > /root/ssh-client-config << EOF
+# Configuration SSH pour Safyra
+# Copiez ce contenu dans votre fichier ~/.ssh/config
+
+Host safyra-bastion
+    HostName ${BASTION_HOST}
+    Port ${BASTION_PORT}
+    User ${BASTION_USER}
+    # Tunnels automatiques vers les interfaces web
+    LocalForward 8080 localhost:8080  # Proxmox Web UI
+    LocalForward 8081 localhost:8081  # VM Web 1
+    LocalForward 8082 localhost:8082  # VM Web 2
+
+Host safyra-proxmox
+    HostName 10.10.10.1
+    Port 8222
+    User root
+    ProxyJump safyra-bastion
+
+# Alias rapides
+Host pve
+    HostName 10.10.10.1
+    Port 8222
+    User root
+    ProxyJump safyra-bastion
+
+Host bastion
+    HostName ${BASTION_HOST}
+    Port ${BASTION_PORT}
+    User ${BASTION_USER}
+EOF
     
     log "SSH client configuration generated at /root/ssh-client-config"
 }
