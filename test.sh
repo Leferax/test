@@ -769,21 +769,85 @@ configure_bastion_vm() {
     # Wait a bit more for SSH to be ready
     sleep 30
     
-    # Create a script to configure the bastion VM
+    # Create a script to configure the bastion VM with nginx reverse proxy
     cat > /tmp/configure_bastion.sh << 'EOF'
 #!/bin/bash
 set -e
 
+echo "Configuring bastion VM..."
+
 # Update the system
 apt update && apt upgrade -y
 
-# Install essential packages
+# Install essential packages including nginx
 apt install -y curl nginx wget git vim htop net-tools fail2ban ufw socat
 
-# The nginx configuration will be handled by the host's reverse proxy
-# Just ensure nginx is stopped on the bastion to avoid conflicts
-systemctl stop nginx
-systemctl disable nginx
+# Configure nginx as reverse proxy
+cat > /etc/nginx/sites-available/vm-proxy << 'NGINXEOF'
+# Proxmox Web UI
+server {
+    listen 8080;
+    server_name _;
+
+    location / {
+        proxy_pass https://10.10.10.1:8006;
+        proxy_ssl_verify off;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # WebSocket support for Proxmox
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+    }
+}
+
+# Template for future VMs - example VM web on 10.10.10.101:80
+server {
+    listen 8081;
+    server_name _;
+
+    location / {
+        proxy_pass http://10.10.10.101:80;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# Template for VM with HTTPS interface - example on 10.10.10.102:443
+server {
+    listen 8082;
+    server_name _;
+
+    location / {
+        proxy_pass https://10.10.10.102:443;
+        proxy_ssl_verify off;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+NGINXEOF
+
+# Remove default nginx site and enable our proxy
+rm -f /etc/nginx/sites-enabled/default
+ln -s /etc/nginx/sites-available/vm-proxy /etc/nginx/sites-enabled/
+
+# Test nginx configuration
+if nginx -t; then
+    systemctl restart nginx
+    systemctl enable nginx
+    echo "Nginx reverse proxy configured successfully"
+else
+    echo "ERROR: Nginx configuration test failed"
+    exit 1
+fi
 
 # Configure SSH to allow forwarding (should already be configured by cloud-init)
 if ! grep -q "AllowTcpForwarding yes" /etc/ssh/sshd_config; then
@@ -800,24 +864,44 @@ ufw --force enable
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow 22/tcp
+ufw allow 8080/tcp
+ufw allow 8081/tcp
+ufw allow 8082/tcp
 ufw allow from 10.10.10.0/24
 
-echo "Bastion VM configuration completed"
+# Verify nginx is listening on the correct ports
+sleep 5
+echo "Nginx status:"
+systemctl status nginx --no-pager
+echo "Listening ports:"
+netstat -tlnp | grep nginx
+
+echo "Bastion VM configuration completed successfully"
 EOF
 
     # Copy and execute the script on the bastion
     if scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /tmp/configure_bastion.sh ${BASTION_USER}@10.10.10.100:/tmp/; then
         if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BASTION_USER}@10.10.10.100 "sudo bash /tmp/configure_bastion.sh"; then
-            log "Bastion VM configured successfully"
+            log "Bastion VM configured successfully with nginx reverse proxy"
         else
             log "WARNING: Failed to configure bastion VM"
+            return 1
         fi
     else
         log "WARNING: Failed to copy configuration script to bastion VM"
+        return 1
     fi
     
     # Clean up
     rm -f /tmp/configure_bastion.sh
+    
+    # Verify nginx is working on the bastion
+    log "Verifying nginx configuration on bastion..."
+    if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BASTION_USER}@10.10.10.100 "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080" | grep -q "200\|302\|401"; then
+        log "✅ Nginx reverse proxy is working on bastion"
+    else
+        log "⚠️  Nginx may not be responding correctly on bastion"
+    fi
 }
 
 # Cleanup and finalization
