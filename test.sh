@@ -263,7 +263,7 @@ EOF
         "wget" "git" "sudo" "curl" "unzip" "gnupg" "software-properties-common"
         "lynis" "clamav" "nftables" "iptables-persistent" "fail2ban"
         "rsyslog" "logrotate" "htop" "tree" "vim" "net-tools"
-        "nginx" "socat"
+        "nginx" "socat" "rsyslog"
     )
     
     for package in "${packages[@]}"; do
@@ -297,25 +297,6 @@ configure_proxmox() {
     pveam download local fedora-41-default_20241118_amd64.tar.xz || log "WARNING: Failed to download Fedora template"
 }
 
-# Enhanced SSH key management
-setup_ssh_keys() {
-    log "Setting up SSH keys..."
-    
-    # Create .ssh directories if they don't exist
-    mkdir -p /root/.ssh
-    chmod 700 /root/.ssh
-    
-    # SSH key for f4ku user (from paste.txt)
-    local f4ku_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDhTyqkUMet5mqtBGTNQhsMerolGh9jcXjX9LteAGvCjD2ZbCav7RA6CTUySHrs+tIL6MNMnyK8E5w6bx/FWTkPnB/CW7TPtVE3TOAnVYm3E2Bys5ZSXh/HH7uG9pKpjAvBXWSaXDgXbcb33u4z1/UP+5ABa73gZfWju0tKdIReUmVjRHi20r+/rta3ujQfn91o+QVrWR3Khsp80M1pSqkABlGbfupZaAhlnM7B82yWvCYq62r4fVaKbFkKfwmfOtW6UlkhWgd5NT1DxCSnCbOFRaKv0EsUDtaae8e7U9LSfBFmYBGLdGuo5jL9IZpssIPL4v8iFjJbFW/wEYakMygfPzt2droXlIhUxSIoBmjJ3paj5egi3mF6CRVIqilvmxMsOeCYdjoo1A/4txQmWwD6zCajm+9b/Iy0h0pMUgpE61sddnkWjChjU73YrKkjJGLF0fzTmKPkGxnQPE1/TQqq06diPyV7UFk1QKgjs+teJZ5l07Lo3sY+SN5BR0azpVM= f4ku@fedora"
-    
-    # Add key to root's authorized_keys if not already present
-    if [[ ! -f /root/.ssh/authorized_keys ]] || ! grep -q "$f4ku_key" /root/.ssh/authorized_keys; then
-        echo "$f4ku_key" >> /root/.ssh/authorized_keys
-        chmod 600 /root/.ssh/authorized_keys
-        log "SSH key added to root authorized_keys"
-    fi
-}
-
 # Secure user management with SSH keys
 configure_users() {
     log "Configuring users..."
@@ -334,8 +315,7 @@ configure_users() {
         chmod 700 /home/safyradmin/.ssh
         
         # Copy the same SSH key to safyradmin
-        local f4ku_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDhTyqkUMet5mqtBGTNQhsMerolGh9jcXjX9LteAGvCjD2ZbCav7RA6CTUySHrs+tIL6MNMnyK8E5w6bx/FWTkPnB/CW7TPtVE3TOAnVYm3E2Bys5ZSXh/HH7uG9pKpjAvBXWSaXDgXbcb33u4z1/UP+5ABa73gZfWju0tKdIReUmVjRHi20r+/rta3ujQfn91o+QVrWR3Khsp80M1pSqkABlGbfupZaAhlnM7B82yWvCYq62r4fVaKbFkKfwmfOtW6UlkhWgd5NT1DxCSnCbOFRaKv0EsUDtaae8e7U9LSfBFmYBGLdGuo5jL9IZpssIPL4v8iFjJbFW/wEYakMygfPzt2droXlIhUxSIoBmjJ3paj5egi3mF6CRVIqilvmxMsOeCYdjoo1A/4txQmWwD6zCajm+9b/Iy0h0pMUgpE61sddnkWjChjU73YrKkjJGLF0fzTmKPkGxnQPE1/TQqq06diPyV7UFk1QKgjs+teJZ5l07Lo3sY+SN5BR0azpVM= f4ku@fedora"
-        echo "$f4ku_key" > /home/safyradmin/.ssh/authorized_keys
+        echo ~/.ssh/authorized_keys > /home/safyradmin/.ssh/authorized_keys
         chmod 600 /home/safyradmin/.ssh/authorized_keys
         chown -R safyradmin:safyradmin /home/safyradmin/.ssh
         
@@ -428,17 +408,58 @@ configure_terraform_user() {
     # Create Terraform user with minimal permissions
     if ! pveum user list | grep -q "terraform@pve"; then
         pveum user add terraform@pve -comment "Terraform Automation User"
+        log "Terraform user created"
+    fi
+    
+    # Create comprehensive Terraform role
+    if ! pveum role list | grep -q "TerraformRole"; then
+        pveum role add TerraformRole -privs \
+"VM.Allocate,VM.Audit,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Console,VM.Migrate,VM.Monitor,VM.PowerMgmt,\
+Datastore.Allocate,Datastore.AllocateSpace,Datastore.Allocate,Datastore.Audit,\
+Pool.Allocate,Pool.Audit,\
+Sys.Audit,Sys.Console,Sys.Modify,Sys.PowerMgmt,\
+SDN.Use,\
+User.Modify"
+        log "TerraformRole created with comprehensive permissions"
+    fi
+    
+    # Assign role to user with proper path permissions
+    pveum aclmod / -user terraform@pve -role TerraformRole
+    pveum aclmod /nodes -user terraform@pve -role TerraformRole
+    pveum aclmod /storage -user terraform@pve -role TerraformRole
+    pveum aclmod /pool -user terraform@pve -role TerraformRole
+    
+    # Generate API token without privilege separation
+    local token_info
+    if token_info=$(pveum user token add terraform@pve terraform-token --privsep 0 --output-format json 2>/dev/null); then
+        local token_value=$(echo "$token_info" | grep -o '"value":"[^"]*"' | cut -d'"' -f4)
         
-        # Terraform role with restricted permissions
-        pveum role add TerraformRole -privs "VM.Allocate,VM.Audit,Datastore.AllocateSpace,Datastore.Audit,Pool.Allocate,Sys.Audit,Sys.Console,Sys.Modify,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Migrate,VM.Monitor,VM.PowerMgmt,SDN.Use" 2>/dev/null || true
+        # Store in secure file
+        cat > "/root/.terraform-credentials" << EOF
+# Terraform Proxmox Credentials
+# Generated: $(date)
+export TF_VAR_proxmox_token="PVEAPIToken=terraform@pve!terraform-token=${token_value}"
+export TF_VAR_proxmox_user="terraform@pve"
+# Don't set password when using token
+# export TF_VAR_proxmox_password=""
+EOF
+        chmod 600 "/root/.terraform-credentials"
         
-        pveum aclmod / -user terraform@pve -role TerraformRole
+        log "✅ Terraform token generated and stored in /root/.terraform-credentials"
+        log "📋 Token format: PVEAPIToken=terraform@pve!terraform-token=${token_value}"
         
-        # Token generation with secure storage
-        local token_file="/etc/pve/.terraform-token.json"
-        if pveum user token add terraform@pve terraform-token --output-format json > "$token_file"; then
-            log "Terraform token generated and stored securely"
+        # Test the token
+        log "🧪 Testing token authentication..."
+        if curl -k -H "Authorization: PVEAPIToken=terraform@pve!terraform-token=${token_value}" \
+           "https://localhost:8006/api2/json/version" >/dev/null 2>&1; then
+            log "✅ Token authentication test successful"
+        else
+            log "⚠️ Token authentication test failed"
         fi
+        
+    else
+        log "❌ Failed to generate token"
+        return 1
     fi
 }
 
@@ -482,32 +503,18 @@ configure_firewall() {
     iptables -A FORWARD -s 10.10.10.0/24 -o vmbr0 -j ACCEPT
     iptables -A FORWARD -d 10.10.10.0/24 -i vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
     
-    # NAT rules for bastion access
-    # SSH to bastion
+    # SSH to bastion SEULEMENT (architecture sécurisée)
     iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 2222 -j DNAT --to-destination 10.10.10.100:22
     iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 22 -j ACCEPT
-    
-    # Web interfaces through bastion
-    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 8080 -j DNAT --to-destination 10.10.10.100:8080
-    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 8081 -j DNAT --to-destination 10.10.10.100:8081
-    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 8082 -j DNAT --to-destination 10.10.10.100:8082
-    
-    iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 8080 -j ACCEPT
-    iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 8081 -j ACCEPT
-    iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 8082 -j ACCEPT
     
     # Protection against common attacks
     iptables -A INPUT -m recent --name blacklist --set -j DROP
     iptables -A INPUT -p tcp --dport 8222 -m recent --name ssh --set
-    iptables -A INPUT -p tcp --dport 8222 -m recent --name ssh --rcheck --seconds 60 --hitcount 4 -j DROP
+    iptables -A INPUT -p tcp --dport 8222 -m recent --name ssh --rcheck --seconds 60 --hitcount 4 -j ACCEPT
     
-    # Save rules for persistence
-    if command -v iptables-save &> /dev/null; then
-        iptables-save > /etc/iptables/rules.v4
-        log "IPv4 iptables rules saved"
-    fi
+    iptables-save > /etc/iptables/rules.v4
+    log "IPv4 iptables rules saved"
     
-    # Configure for persistence on reboot
     systemctl enable netfilter-persistent || true
 }
 
@@ -693,25 +700,65 @@ configure_security() {
         systemctl start auditd
     fi
     
-    # Fail2Ban configuration for SSH
-    cat > /etc/fail2ban/jail.local << 'EOF'
+# local jail configuration
+sudo tee /etc/fail2ban/jail.local << 'EOF'
+[DEFAULT]
+# Ban time: 1 hour then more
+bantime = 3600
+findtime = 600
+maxretry = 3
+backend = systemd
+
+# Email notifications 
+# destemail = admin@votre-domaine.com
+# sender = fail2ban@votre-domaine.com
+# action = %(action_mw)s
+
 [sshd]
 enabled = true
-port = 8222
+port = 22
 logpath = /var/log/auth.log
+backend = systemd
 maxretry = 3
-bantime = 3600
 findtime = 600
+bantime = 3600
+ignoreip = 127.0.0.1/8 10.10.10.0/24
 
-[nginx-http-auth]
+# Jail for attempt on non-existing user
+[sshd-ddos]
 enabled = true
-port = 8080,8081,8082
-logpath = /var/log/nginx/error.log
+port = 22
+logpath = /var/log/auth.log
+maxretry = 2
+findtime = 300
+bantime = 7200
+filter = sshd-ddos
+
+# port-scanning protection 
+[port-scan]
+enabled = true
+logpath = /var/log/syslog
 maxretry = 5
-bantime = 3600
-findtime = 600
+findtime = 300
+bantime = 86400
+filter = port-scan
 EOF
-    
+    sudo tee /etc/fail2ban/filter.d/sshd-ddos.conf << 'EOF'
+[Definition]
+failregex = sshd\[\d+\]: Did not receive identification string from <HOST>
+            sshd\[\d+\]: Connection closed by <HOST> port \d+ \[preauth\]
+            sshd\[\d+\]: Invalid user .* from <HOST>
+            sshd\[\d+\]: User .+ from <HOST> not allowed because not listed in AllowUsers
+            sshd\[\d+\]: authentication failure; logname=.* uid=.* euid=.* tty=.* ruser=.* rhost=<HOST>
+ignoreregex =
+EOF
+
+
+    sudo tee /etc/fail2ban/filter.d/port-scan.conf << 'EOF'
+[Definition]
+failregex = kernel:.*\[UFW BLOCK\].*SRC=<HOST>
+ignoreregex =
+EOF  
     systemctl enable fail2ban
     systemctl start fail2ban
     
