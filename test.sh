@@ -181,12 +181,6 @@ EOF
 configure_network() {
     log "Configuring network..."
     
-    # DNS configuration with fallback
-    cat > /etc/resolv.conf << 'EOF'
-nameserver 9.9.9.9
-options timeout:5 attempts:9
-EOF
-    
     # Make resolv.conf immutable to prevent overwriting
     chattr +i /etc/resolv.conf || log "WARNING: Cannot make resolv.conf immutable"
     
@@ -315,7 +309,7 @@ configure_users() {
         chmod 700 /home/safyradmin/.ssh
         
         # Copy the same SSH key to safyradmin
-        echo ~/.ssh/authorized_keys > /home/safyradmin/.ssh/authorized_keys
+        cp ~/.ssh/authorized_keys > /home/safyradmin/.ssh/authorized_keys
         chmod 600 /home/safyradmin/.ssh/authorized_keys
         chown -R safyradmin:safyradmin /home/safyradmin/.ssh
         
@@ -336,10 +330,10 @@ configure_users() {
 # VM Template creation and bastion setup
 setup_vm_infrastructure() {
     log "Setting up VM infrastructure..."
-    
+
     # Wait for Proxmox to be ready
     sleep 30
-    
+
     # Download Debian cloud image
     cd /tmp
     if [[ ! -f debian-12-generic-amd64.qcow2 ]]; then
@@ -348,36 +342,78 @@ setup_vm_infrastructure() {
             return 1
         }
     fi
-    
+
     # Create VM template if it doesn't exist
     if ! qm list | grep -q "9000"; then
         log "Creating Debian 12 cloud-init template..."
-        
+
         # Create the template VM
         qm create 9000 --name debian-12-cloudinit-template --memory 2048 --cores 2 --net0 virtio,bridge=vmbr1
-        
+
         # Import disk
+        log "Importing disk..."
         qm importdisk 9000 debian-12-generic-amd64.qcow2 local
         
-        # Configure template
-        qm set 9000 --scsihw virtio-scsi-pci --scsi0 local:9000/vm-9000-disk-0.raw
+        # Wait for import to complete
+        sleep 5
+        
+        # Find the imported disk name (could be .raw or .qcow2)
+        DISK_NAME=""
+        if [[ -f /var/lib/vz/images/9000/vm-9000-disk-0.raw ]]; then
+            DISK_NAME="vm-9000-disk-0.raw"
+        elif [[ -f /var/lib/vz/images/9000/vm-9000-disk-0.qcow2 ]]; then
+            DISK_NAME="vm-9000-disk-0.qcow2"
+        else
+            # Try to find any disk file
+            DISK_NAME=$(ls /var/lib/vz/images/9000/ 2>/dev/null | grep -E "vm-9000-disk-[0-9]+\.(raw|qcow2)" | head -1)
+        fi
+        
+        if [[ -z "$DISK_NAME" ]]; then
+            log "ERROR: No disk found after import, check /var/lib/vz/images/9000/"
+            return 1
+        fi
+        
+        log "Found imported disk: $DISK_NAME"
+
+        # Configure template with the correct disk name
+        qm set 9000 --scsihw virtio-scsi-pci --scsi0 local:9000/${DISK_NAME}
         qm set 9000 --ide2 local:cloudinit
-        qm set 9000 --boot c --bootdisk scsi0
+        qm set 9000 --boot order=scsi0
         qm set 9000 --serial0 socket --vga serial0
         
+        # Verify disk is attached before converting to template
+        if ! qm config 9000 | grep -q "scsi0:"; then
+            log "ERROR: Disk not properly attached to template"
+            # Try to fix if disk is in unused state
+            if qm config 9000 | grep -q "unused0:"; then
+                log "Attempting to fix unused disk..."
+                UNUSED_DISK=$(qm config 9000 | grep "unused0:" | cut -d' ' -f2)
+                qm set 9000 --scsi0 ${UNUSED_DISK} --scsihw virtio-scsi-pci
+            else
+                return 1
+            fi
+        fi
+
         # Convert to template
         qm template 9000
-        
+
         log "VM template 9000 created successfully"
     fi
-    
+
     # Create bastion VM if it doesn't exist
     if ! qm list | grep -q "200"; then
         log "Creating bastion VM..."
-        
+
         # Clone template for bastion
         qm clone 9000 200 --name bastion-safyra --full
         
+        # Verify clone has disk
+        if ! qm config 200 | grep -q "scsi0:"; then
+            log "ERROR: Clone doesn't have disk attached"
+            return 1
+        fi
+        BASTION_VM_PASSWORD=$(openssl rand -base64 12)
+        echo "BASTION_VM_PASSWORD=${BASTION_VM_PASSWORD}" >> /root/.safyra_credentials
         # Configure bastion VM
         qm set 200 \
             --memory 4096 \
@@ -386,17 +422,38 @@ setup_vm_infrastructure() {
             --ciuser ${BASTION_USER} \
             --ipconfig0 ip=10.10.10.100/24,gw=10.10.10.1 \
             --nameserver 9.9.9.9 \
-            --sshkeys /root/.ssh/authorized_keys
-        
+            --cipassword "${BASTION_VM_PASSWORD}"
+
+        # Add SSH keys if they exist
+        if [[ -f /root/.ssh/authorized_keys ]]; then
+            qm set 200 --sshkeys /root/.ssh/authorized_keys
+            log "SSH keys added to bastion VM"
+        else
+            log "WARNING: No SSH keys found at /root/.ssh/authorized_keys"
+            # Set a temporary password for cloud-init
+            qm set 200 --cipassword "TempPass$(date +%s)"
+        fi
+
         # Resize disk to 32GB
-        qm resize 200 scsi0 32G
-        
+        if ! qm resize 200 scsi0 32G; then
+            log "WARNING: Failed to resize disk"
+        fi
+
         # Start the VM
         qm start 200
-        
+
         log "Bastion VM 200 created and started"
+        log "Waiting 90 seconds for cloud-init..."
+        sleep 90
+        
+        # Test connectivity
+        if ping -c 3 10.10.10.100 &>/dev/null; then
+            log "Bastion VM is reachable at 10.10.10.100"
+        else
+            log "Bastion VM not responding to ping yet"
+        fi
     fi
-    
+
     # Clean up
     rm -f /tmp/debian-12-generic-amd64.qcow2
 }
@@ -407,35 +464,56 @@ configure_terraform_user() {
     
     # Create Terraform user with minimal permissions
     if ! pveum user list | grep -q "terraform@pve"; then
-        pveum user add terraform@pve -comment "Terraform Automation User"
-        log "Terraform user created"
+        log "Terraform user does not exist. Creating it now..."
+        if pveum user add terraform@pve -comment "Terraform Automation User"; then
+            log "Terraform user created successfully"
+        else
+            log "Warning: Failed to create Terraform user. It might already exist or there was another issue."
+        fi
+    else
+        log "Terraform user already exists. Skipping user creation."
     fi
     
     # Create comprehensive Terraform role
     if ! pveum role list | grep -q "TerraformRole"; then
-        pveum role add TerraformRole -privs \
+        log "TerraformRole does not exist. Creating it now..."
+        if pveum role add TerraformRole -privs \
 "VM.Allocate,VM.Audit,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Console,VM.Migrate,VM.Monitor,VM.PowerMgmt,\
 Datastore.Allocate,Datastore.AllocateSpace,Datastore.Allocate,Datastore.Audit,\
 Pool.Allocate,Pool.Audit,\
 Sys.Audit,Sys.Console,Sys.Modify,Sys.PowerMgmt,\
 SDN.Use,\
-User.Modify"
-        log "TerraformRole created with comprehensive permissions"
-    fi
+User.Modify"; then
+            log "TerraformRole created with comprehensive permissions"
+        else
+            log "Warning: Failed to create TerraformRole. It might already exist or there was another issue."
+        fi
+    else
+        log "TerraformRole already exists. Skipping role creation."
+    fi  
     
     # Assign role to user with proper path permissions
+    log "Assigning TerraformRole to user..."
     pveum aclmod / -user terraform@pve -role TerraformRole
     pveum aclmod /nodes -user terraform@pve -role TerraformRole
     pveum aclmod /storage -user terraform@pve -role TerraformRole
     pveum aclmod /pool -user terraform@pve -role TerraformRole
+    log "Roles assigned."
     
-    # Generate API token without privilege separation
-    local token_info
-    if token_info=$(pveum user token add terraform@pve terraform-token --privsep 0 --output-format json 2>/dev/null); then
-        local token_value=$(echo "$token_info" | grep -o '"value":"[^"]*"' | cut -d'"' -f4)
-        
-        # Store in secure file
-        cat > "/root/.terraform-credentials" << EOF
+    # Check if a token with the specific ID already exists
+    local token_exists=0
+    if pveum user token list terraform@pve | grep -q "terraform-token"; then
+        token_exists=1
+    fi
+    
+    if [ "$token_exists" -eq 0 ]; then
+        log "Terraform API token does not exist. Generating a new one..."
+        local token_info
+        if token_info=$(pveum user token add terraform@pve terraform-token --privsep 0 --output-format json 2>/dev/null); then
+            local token_value=$(echo "$token_info" | grep -o '"value":"[^"]*"' | cut -d'"' -f4)
+            
+            # Store in secure file
+            cat > "/root/.terraform-credentials" << EOF
 # Terraform Proxmox Credentials
 # Generated: $(date)
 export TF_VAR_proxmox_token="PVEAPIToken=terraform@pve!terraform-token=${token_value}"
@@ -443,26 +521,30 @@ export TF_VAR_proxmox_user="terraform@pve"
 # Don't set password when using token
 # export TF_VAR_proxmox_password=""
 EOF
-        chmod 600 "/root/.terraform-credentials"
-        
-        log "✅ Terraform token generated and stored in /root/.terraform-credentials"
-        log "📋 Token format: PVEAPIToken=terraform@pve!terraform-token=${token_value}"
-        
-        # Test the token
-        log "🧪 Testing token authentication..."
-        if curl -k -H "Authorization: PVEAPIToken=terraform@pve!terraform-token=${token_value}" \
-           "https://localhost:8006/api2/json/version" >/dev/null 2>&1; then
-            log "✅ Token authentication test successful"
+            chmod 600 "/root/.terraform-credentials"
+            
+            log "✅ Terraform token generated and stored in /root/.terraform-credentials"
+            log "📋 Token format: PVEAPIToken=terraform@pve!terraform-token=${token_value}"
+            
+            # Test the token
+            log "🧪 Testing token authentication..."
+            if curl -k -H "Authorization: PVEAPIToken=terraform@pve!terraform-token=${token_value}" \
+               "https://localhost:8006/api2/json/version" >/dev/null 2>&1; then
+                log "✅ Token authentication test successful"
+            else
+                log "⚠️ Token authentication test failed"
+            fi
         else
-            log "⚠️ Token authentication test failed"
+            log "❌ Failed to generate token. This could be due to a race condition or a transient error."
+            return 1
         fi
-        
     else
-        log "❌ Failed to generate token"
-        return 1
+        log "Terraform API token already exists. Skipping token generation."
+        # Because we can't use tokenid, we assume the token is valid and don't try to retrieve its value or test it
+        log "Note: Unable to re-authenticate with the existing token on this Proxmox version."
+        log "The script will proceed, assuming the existing token is configured correctly."
     fi
 }
-
 # Enhanced firewall configuration with NAT rules for bastion
 configure_firewall() {
     log "Configuring firewall with persistent rules and NAT for bastion..."
@@ -503,7 +585,7 @@ configure_firewall() {
     iptables -A FORWARD -s 10.10.10.0/24 -o vmbr0 -j ACCEPT
     iptables -A FORWARD -d 10.10.10.0/24 -i vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
     
-    # SSH to bastion SEULEMENT (architecture sécurisée)
+    # SSH to bastion
     iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 2222 -j DNAT --to-destination 10.10.10.100:22
     iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 22 -j ACCEPT
     
@@ -608,7 +690,7 @@ Host safyra-bastion
     HostName \${BASTION_HOST}
     Port \${BASTION_PORT}
     User \${BASTION_USER}
-    # Tunnels automatiques vers les interfaces web
+    # Tunnels for web interfaces
     LocalForward 8080 localhost:8080  # Proxmox Web UI
     LocalForward 8081 localhost:8081  # VM Web 1
     LocalForward 8082 localhost:8082  # VM Web 2
@@ -632,16 +714,16 @@ Host bastion
     User \${BASTION_USER}
 SSHEOF
 
-echo "Configuration SSH générée dans /root/ssh-client-config"
+echo "SSH Configuration generated in /root/ssh-client-config"
 echo ""
-echo "=== Instructions pour le client ==="
-echo "1. Téléchargez le fichier:"
+echo "=== Client instructions==="
+echo "1. Download the file:"
 echo "   scp \${BASTION_USER}@\${BASTION_HOST}:\${BASTION_PORT}/root/ssh-client-config ~/.ssh/config-safyra"
 echo ""
-echo "2. Ajoutez le contenu à votre ~/.ssh/config:"
+echo "2. Add it to ~/.ssh/config:"
 echo "   cat ~/.ssh/config-safyra >> ~/.ssh/config"
 echo ""
-echo "3. Connectez-vous avec les tunnels:"
+echo "3. Connect:"
 echo "   ssh safyra-bastion"
 echo ""
 echo "4. Accédez aux interfaces web:"
@@ -654,14 +736,14 @@ EOF
     
     # Generate the configuration immediately with proper variable substitution
     cat > /root/ssh-client-config << EOF
-# Configuration SSH pour Safyra
-# Copiez ce contenu dans votre fichier ~/.ssh/config
+# SSH Configuration for Safyra
+# Copy the content in your file ~/.ssh/config
 
 Host safyra-bastion
     HostName ${BASTION_HOST}
     Port ${BASTION_PORT}
     User ${BASTION_USER}
-    # Tunnels automatiques vers les interfaces web
+    # Tunnels for web interfaces
     LocalForward 8080 localhost:8080  # Proxmox Web UI
     LocalForward 8081 localhost:8081  # VM Web 1
     LocalForward 8082 localhost:8082  # VM Web 2
@@ -1022,6 +1104,7 @@ main() {
     configure_users
     configure_terraform_user
     configure_firewall
+    setup_vm_infrastructure
     configure_nginx_proxy
     generate_ssh_config
     configure_security
