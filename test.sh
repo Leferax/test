@@ -592,7 +592,7 @@ configure_firewall() {
     # Protection against common attacks
     iptables -A INPUT -m recent --name blacklist --set -j DROP
     iptables -A INPUT -p tcp --dport 8222 -m recent --name ssh --set
-    iptables -A INPUT -p tcp --dport 8222 -m recent --name ssh --rcheck --seconds 60 --hitcount 4 -j ACCEPT
+    iptables -A INPUT -p tcp --dport 8222 -m recent --name ssh --rcheck --seconds 60 --hitcount 4 -j DROP
     
     iptables-save > /etc/iptables/rules.v4
     log "IPv4 iptables rules saved"
