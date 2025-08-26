@@ -642,18 +642,18 @@ server {
 }
 
 # Template for VM with HTTPS interface - example on 10.10.10.102:443
-server {
-    listen 8082;
-    server_name _;
+#server {
+    #listen 8082;
+    #server_name _;
 
-    location / {
-        proxy_pass https://10.10.10.102:443;
-        proxy_ssl_verify off;
-        proxy_set_header Host $host:$server_port;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
+    #location / {
+        #proxy_pass https://10.10.10.102:443;
+        #proxy_ssl_verify off;
+        #proxy_set_header Host $host:$server_port;
+        #proxy_set_header X-Real-IP $remote_addr;
+        #proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        #proxy_set_header X-Forwarded-Proto $scheme;
+    #}
 }
 EOF
 
