@@ -628,18 +628,18 @@ server {
 }
 
 # Template for future VMs - example VM web on 10.10.10.101:80
-server {
-    listen 8081;
-    server_name _;
+#server {
+    #listen 8081;
+    #server_name _;
 
-    location / {
-        proxy_pass http://10.10.10.101:80;
-        proxy_set_header Host $host:$server_port;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
+    #location / {
+        #proxy_pass http://10.10.10.101:80;
+        #proxy_set_header Host $host:$server_port;
+        #proxy_set_header X-Real-IP $remote_addr;
+        #proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        #proxy_set_header X-Forwarded-Proto $scheme;
+    #}
+#}
 
 # Template for VM with HTTPS interface - example on 10.10.10.102:443
 #server {
@@ -654,7 +654,7 @@ server {
         #proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         #proxy_set_header X-Forwarded-Proto $scheme;
     #}
-}
+#}
 EOF
 
     # Remove default nginx sites and enable our proxy
