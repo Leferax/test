@@ -309,7 +309,7 @@ configure_users() {
         chmod 700 /home/safyradmin/.ssh
         
         # Copy the same SSH key to safyradmin
-        cp ~/.ssh/authorized_keys > /home/safyradmin/.ssh/authorized_keys
+        cp ~/.ssh/authorized_keys /home/safyradmin/.ssh/authorized_keys
         chmod 600 /home/safyradmin/.ssh/authorized_keys
         chown -R safyradmin:safyradmin /home/safyradmin/.ssh
         
