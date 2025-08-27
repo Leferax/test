@@ -24,7 +24,78 @@ error_exit() {
     log "ERROR: $1"
     exit 1
 }
+# Security audit
+run_security_audit() {
+    log "Running security audit..."
+    
+    # Lynis audit
+    if command -v lynis &> /dev/null; then
+        lynis audit system --quiet > /root/lynis_report.txt 2>&1
+        chmod 600 /root/lynis_report.txt
+        log "Lynis audit report generated: /root/lynis_report.txt"
+    fi
+    
+    # Update antivirus signatures
+    if command -v freshclam &> /dev/null; then
+        freshclam --quiet || log "WARNING: Failed to update ClamAV signatures"
+    fi
+}
 
+
+# Cleanup and finalization
+cleanup_and_finalize() {
+    log "Cleanup and finalization..."
+    
+    # APT cache cleanup
+    apt autoremove -y
+    apt autoclean
+    
+    # Log rotation configuration
+    cat > /etc/logrotate.d/safyra << 'EOF'
+/var/log/safyra_install*.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 644 root root
+}
+EOF
+    
+    # Update locate database
+    updatedb || true
+    
+    # Generate installation report
+    {
+        echo "=== SAFYRA INSTALLATION REPORT ==="
+        echo "Date: $(date)"
+        echo "Script Version: $SCRIPT_VERSION"
+        echo "Hostname: $(hostname)"
+        echo "Primary IP: $(ip route get 1 | awk '{print $7}' | head -1)"
+        echo "Users created: safyradmin"
+        echo "SSH Port: 8222"
+        echo "Bastion SSH Port: ${BASTION_PORT}"
+        echo "Bastion User: ${BASTION_USER}"
+        echo "Installation logs: $LOG_FILE"
+        echo "Credentials: $SAFYRA_CREDS_FILE"
+        echo "SSH Config Generator: /root/generate-ssh-config.sh"
+        echo "VM Template ID: 9000 (Debian 12 Cloud-Init)"
+        echo "Bastion VM ID: 200 (IP: 10.10.10.100)"
+        echo "===================================="
+        echo "Access Instructions:"
+        echo "1. SSH to bastion: ssh ${BASTION_USER}@${BASTION_HOST} -p ${BASTION_PORT}"
+        echo "2. SSH to Proxmox via bastion: ssh root@10.10.10.1 -p 8222 -o ProxyJump=${BASTION_USER}@${BASTION_HOST}:${BASTION_PORT}"
+        echo "3. Web access (via SSH tunnels):"
+        echo "   - Proxmox UI: http://localhost:8080"
+        echo "   - VM Web 1: http://localhost:8081"
+        echo "   - VM Web 2: http://localhost:8082"
+        echo "===================================="
+    } > /root/safyra_install_report.txt
+    
+    chmod 600 /root/safyra_install_report.txt
+    log "Installation report generated: /root/safyra_install_report.txt"
+}
 # Prerequisites verification function
 check_prerequisites() {
     log "Checking prerequisites..."
@@ -327,6 +398,167 @@ configure_users() {
     fi
 }
 
+# Wait for bastion VM to be ready and configure it
+configure_bastion_vm() {
+    log "Waiting for bastion VM to be ready..."
+    
+    local max_attempts=60
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        if ping -c 1 10.10.10.100 &>/dev/null; then
+            log "Bastion VM is reachable"
+            break
+        fi
+        
+        log "Waiting for bastion VM... attempt $attempt/$max_attempts"
+        sleep 10
+        ((attempt++))
+    done
+    
+    if [[ $attempt -gt $max_attempts ]]; then
+        log "WARNING: Bastion VM did not become reachable within expected time"
+        return 1
+    fi
+    
+    # Wait a bit more for SSH to be ready
+    sleep 30
+    
+    # Create a script to configure the bastion VM with nginx reverse proxy
+    cat > /tmp/configure_bastion.sh << 'EOF'
+#!/bin/bash
+set -e
+
+echo "Configuring bastion VM..."
+
+# Update the system
+apt update && apt upgrade -y
+
+# Install essential packages including nginx
+apt install -y curl nginx wget git vim htop net-tools fail2ban ufw socat
+
+# Configure nginx as reverse proxy
+cat > /etc/nginx/sites-available/vm-proxy << 'NGINXEOF'
+# Proxmox Web UI
+server {
+    listen 8080;
+    server_name _;
+
+    location / {
+        proxy_pass https://10.10.10.1:8006;
+        proxy_ssl_verify off;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # WebSocket support for Proxmox
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+    }
+}
+
+# Template for future VMs - example VM web on 10.10.10.101:80
+server {
+    listen 8081;
+    server_name _;
+
+    location / {
+        proxy_pass http://10.10.10.101:80;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# Template for VM with HTTPS interface - example on 10.10.10.102:443
+server {
+    listen 8082;
+    server_name _;
+
+    location / {
+        proxy_pass https://10.10.10.102:443;
+        proxy_ssl_verify off;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+NGINXEOF
+
+# Remove default nginx site and enable our proxy
+rm -f /etc/nginx/sites-enabled/default
+ln -s /etc/nginx/sites-available/vm-proxy /etc/nginx/sites-enabled/
+
+# Test nginx configuration
+if nginx -t; then
+    systemctl restart nginx
+    systemctl enable nginx
+    echo "Nginx reverse proxy configured successfully"
+else
+    echo "ERROR: Nginx configuration test failed"
+    exit 1
+fi
+
+# Configure SSH to allow forwarding (should already be configured by cloud-init)
+if ! grep -q "AllowTcpForwarding yes" /etc/ssh/sshd_config; then
+    echo "AllowTcpForwarding yes" >> /etc/ssh/sshd_config
+    echo "AllowAgentForwarding yes" >> /etc/ssh/sshd_config
+    echo "PermitTunnel yes" >> /etc/ssh/sshd_config
+    echo "GatewayPorts no" >> /etc/ssh/sshd_config
+    echo "AllowStreamLocalForwarding yes" >> /etc/ssh/sshd_config
+    systemctl restart sshd
+fi
+
+# Configure basic firewall
+ufw --force enable
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 22/tcp
+ufw allow 8080/tcp
+ufw allow 8081/tcp
+ufw allow 8082/tcp
+ufw allow from 10.10.10.0/24
+
+# Verify nginx is listening on the correct ports
+sleep 5
+echo "Nginx status:"
+systemctl status nginx --no-pager
+echo "Listening ports:"
+netstat -tlnp | grep nginx
+
+echo "Bastion VM configuration completed successfully"
+EOF
+
+    # Copy and execute the script on the bastion
+    if scp -v -o StrictHostKeyChecking=no /tmp/configure_bastion.sh safyradmin@10.10.10.100:/tmp/; then
+        if ssh -v -o StrictHostKeyChecking=no safyradmin@10.10.10.100 "sudo bash /tmp/configure_bastion.sh"; then
+            log "Bastion VM configured successfully with nginx reverse proxy"
+        else
+            log "WARNING: Failed to configure bastion VM"
+            return 1
+        fi
+    else
+        log "WARNING: Failed to copy configuration script to bastion VM"
+        return 1
+    fi
+    
+    # Clean up
+    #rm -f /tmp/configure_bastion.sh
+    
+    # Verify nginx is working on the bastion
+    log "Verifying nginx configuration on bastion..."
+    if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BASTION_USER}@10.10.10.100 "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080" | grep -q "200\|302\|401"; then
+        log "✅ Nginx reverse proxy is working on bastion"
+    else
+        log "⚠️  Nginx may not be responding correctly on bastion"
+    fi
+}
+
 # VM Template creation and bastion setup
 setup_vm_infrastructure() {
     log "Setting up VM infrastructure..."
@@ -422,26 +654,15 @@ setup_vm_infrastructure() {
             --ciuser ${BASTION_USER} \
             --ipconfig0 ip=10.10.10.100/24,gw=10.10.10.1 \
             --nameserver 9.9.9.9 \
-            --cipassword "${BASTION_VM_PASSWORD}"
+            --cipassword "${BASTION_VM_PASSWORD}" 
 
         # Add SSH keys if they exist
-        if [[ -f /root/.ssh/authorized_keys ]]; then
-            qm set 200 --sshkeys /root/.ssh/authorized_keys
-            log "SSH keys added to bastion VM"
-        else
-            log "WARNING: No SSH keys found at /root/.ssh/authorized_keys"
-            # Set a temporary password for cloud-init
-            qm set 200 --cipassword "TempPass$(date +%s)"
-        fi
-
-        # Resize disk to 32GB
-        if ! qm resize 200 scsi0 32G; then
-            log "WARNING: Failed to resize disk"
-        fi
-
-        # Start the VM
+        qm set 200 --sshkeys /root/.ssh/authorized_keys
+        log "SSH keys added to bastion VM"
+        qm stop 200
+        qemu-img resize /var/lib/vz/images/200/vm-200-disk-0.raw 32G
+        qm rescan
         qm start 200
-
         log "Bastion VM 200 created and started"
         log "Waiting 90 seconds for cloud-init..."
         sleep 90
@@ -670,7 +891,88 @@ EOF
         log "WARNING: Nginx configuration test failed"
     fi
 }
+# System security configuration
+# Remplacez votre fonction configure_security() par cette version corrigée :
 
+configure_security() {
+    log "Configuring system security..."
+    
+    # System audit configuration
+    if systemctl is-active --quiet auditd; then
+        log "auditd service active"
+    else
+        systemctl enable auditd
+        systemctl start auditd
+    fi
+    
+    # Configure fail2ban - jail configuration
+    sudo tee /etc/fail2ban/jail.local << 'EOF'
+[DEFAULT]
+# Ban time: 1 hour then more
+bantime = 3600
+findtime = 600
+maxretry = 3
+backend = systemd
+
+[sshd]
+enabled = true
+port = 22
+logpath = /var/log/auth.log
+backend = systemd
+maxretry = 3
+findtime = 600
+bantime = 3600
+ignoreip = 127.0.0.1/8 10.10.10.0/24
+
+[sshd-ddos]
+enabled = true
+port = 22
+logpath = /var/log/auth.log
+maxretry = 2
+findtime = 300
+bantime = 7200
+filter = sshd-ddos
+
+[port-scan]
+enabled = true
+logpath = /var/log/syslog
+maxretry = 5
+findtime = 300
+bantime = 86400
+filter = port-scan
+EOF
+
+    # Configure fail2ban filters
+    sudo tee /etc/fail2ban/filter.d/sshd-ddos.conf << 'EOF'
+[Definition]
+failregex = sshd\[\d+\]: Did not receive identification string from <HOST>
+            sshd\[\d+\]: Connection closed by <HOST> port \d+ \[preauth\]
+            sshd\[\d+\]: Invalid user .* from <HOST>
+            sshd\[\d+\]: User .+ from <HOST> not allowed because not listed in AllowUsers
+            sshd\[\d+\]: authentication failure; logname=.* uid=.* euid=.* tty=.* ruser=.* rhost=<HOST>
+ignoreregex =
+EOF
+
+    sudo tee /etc/fail2ban/filter.d/port-scan.conf << 'EOF'
+[Definition]
+failregex = kernel:.*\[UFW BLOCK\].*SRC=<HOST>
+ignoreregex =
+EOF
+
+    # Start fail2ban services
+    systemctl enable fail2ban
+    systemctl start fail2ban
+    
+    # More restrictive default permissions
+    sed -i 's/^UMASK.*/UMASK\t027/' /etc/login.defs
+    
+    # Disable unnecessary system accounts
+    for user in games news uucp proxy www-data backup list irc gnats nobody; do
+        if id "$user" &>/dev/null; then
+            usermod -L -s /bin/false "$user" 2>/dev/null || true
+        fi
+    done
+}
 # Generate SSH client configuration helper
 generate_ssh_config() {
     log "Generating SSH client configuration..."
@@ -770,324 +1072,6 @@ EOF
     log "SSH client configuration generated at /root/ssh-client-config"
 }
 
-# System security configuration
-configure_security() {
-    log "Configuring system security..."
-    
-    # System audit configuration
-    if systemctl is-active --quiet auditd; then
-        log "auditd service active"
-    else
-        systemctl enable auditd
-        systemctl start auditd
-    fi
-    
-# local jail configuration
-sudo tee /etc/fail2ban/jail.local << 'EOF'
-[DEFAULT]
-# Ban time: 1 hour then more
-bantime = 3600
-findtime = 600
-maxretry = 3
-backend = systemd
-
-# Email notifications 
-# destemail = admin@votre-domaine.com
-# sender = fail2ban@votre-domaine.com
-# action = %(action_mw)s
-
-[sshd]
-enabled = true
-port = 22
-logpath = /var/log/auth.log
-backend = systemd
-maxretry = 3
-findtime = 600
-bantime = 3600
-ignoreip = 127.0.0.1/8 10.10.10.0/24
-
-# Jail for attempt on non-existing user
-[sshd-ddos]
-enabled = true
-port = 22
-logpath = /var/log/auth.log
-maxretry = 2
-findtime = 300
-bantime = 7200
-filter = sshd-ddos
-
-# port-scanning protection 
-[port-scan]
-enabled = true
-logpath = /var/log/syslog
-maxretry = 5
-findtime = 300
-bantime = 86400
-filter = port-scan
-EOF
-    sudo tee /etc/fail2ban/filter.d/sshd-ddos.conf << 'EOF'
-[Definition]
-failregex = sshd\[\d+\]: Did not receive identification string from <HOST>
-            sshd\[\d+\]: Connection closed by <HOST> port \d+ \[preauth\]
-            sshd\[\d+\]: Invalid user .* from <HOST>
-            sshd\[\d+\]: User .+ from <HOST> not allowed because not listed in AllowUsers
-            sshd\[\d+\]: authentication failure; logname=.* uid=.* euid=.* tty=.* ruser=.* rhost=<HOST>
-ignoreregex =
-EOF
-
-
-    sudo tee /etc/fail2ban/filter.d/port-scan.conf << 'EOF'
-[Definition]
-failregex = kernel:.*\[UFW BLOCK\].*SRC=<HOST>
-ignoreregex =
-EOF  
-    systemctl enable fail2ban
-    systemctl start fail2ban
-    
-    # More restrictive default permissions
-    sed -i 's/^UMASK.*/UMASK\t027/' /etc/login.defs
-    
-    # Disable unnecessary system accounts
-    for user in games news uucp proxy www-data backup list irc gnats nobody; do
-        if id "$user" &>/dev/null; then
-            usermod -L -s /bin/false "$user" 2>/dev/null || true
-        fi
-    done
-}
-
-# Security audit
-run_security_audit() {
-    log "Running security audit..."
-    
-    # Lynis audit
-    if command -v lynis &> /dev/null; then
-        lynis audit system --quiet > /root/lynis_report.txt 2>&1
-        chmod 600 /root/lynis_report.txt
-        log "Lynis audit report generated: /root/lynis_report.txt"
-    fi
-    
-    # Update antivirus signatures
-    if command -v freshclam &> /dev/null; then
-        freshclam --quiet || log "WARNING: Failed to update ClamAV signatures"
-    fi
-}
-
-# Wait for bastion VM to be ready and configure it
-configure_bastion_vm() {
-    log "Waiting for bastion VM to be ready..."
-    
-    local max_attempts=60
-    local attempt=1
-    
-    while [[ $attempt -le $max_attempts ]]; do
-        if ping -c 1 10.10.10.100 &>/dev/null; then
-            log "Bastion VM is reachable"
-            break
-        fi
-        
-        log "Waiting for bastion VM... attempt $attempt/$max_attempts"
-        sleep 10
-        ((attempt++))
-    done
-    
-    if [[ $attempt -gt $max_attempts ]]; then
-        log "WARNING: Bastion VM did not become reachable within expected time"
-        return 1
-    fi
-    
-    # Wait a bit more for SSH to be ready
-    sleep 30
-    
-    # Create a script to configure the bastion VM with nginx reverse proxy
-    cat > /tmp/configure_bastion.sh << 'EOF'
-#!/bin/bash
-set -e
-
-echo "Configuring bastion VM..."
-
-# Update the system
-apt update && apt upgrade -y
-
-# Install essential packages including nginx
-apt install -y curl nginx wget git vim htop net-tools fail2ban ufw socat
-
-# Configure nginx as reverse proxy
-cat > /etc/nginx/sites-available/vm-proxy << 'NGINXEOF'
-# Proxmox Web UI
-server {
-    listen 8080;
-    server_name _;
-
-    location / {
-        proxy_pass https://10.10.10.1:8006;
-        proxy_ssl_verify off;
-        proxy_set_header Host $host:$server_port;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        
-        # WebSocket support for Proxmox
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_buffering off;
-    }
-}
-
-# Template for future VMs - example VM web on 10.10.10.101:80
-server {
-    listen 8081;
-    server_name _;
-
-    location / {
-        proxy_pass http://10.10.10.101:80;
-        proxy_set_header Host $host:$server_port;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-
-# Template for VM with HTTPS interface - example on 10.10.10.102:443
-server {
-    listen 8082;
-    server_name _;
-
-    location / {
-        proxy_pass https://10.10.10.102:443;
-        proxy_ssl_verify off;
-        proxy_set_header Host $host:$server_port;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-NGINXEOF
-
-# Remove default nginx site and enable our proxy
-rm -f /etc/nginx/sites-enabled/default
-ln -s /etc/nginx/sites-available/vm-proxy /etc/nginx/sites-enabled/
-
-# Test nginx configuration
-if nginx -t; then
-    systemctl restart nginx
-    systemctl enable nginx
-    echo "Nginx reverse proxy configured successfully"
-else
-    echo "ERROR: Nginx configuration test failed"
-    exit 1
-fi
-
-# Configure SSH to allow forwarding (should already be configured by cloud-init)
-if ! grep -q "AllowTcpForwarding yes" /etc/ssh/sshd_config; then
-    echo "AllowTcpForwarding yes" >> /etc/ssh/sshd_config
-    echo "AllowAgentForwarding yes" >> /etc/ssh/sshd_config
-    echo "PermitTunnel yes" >> /etc/ssh/sshd_config
-    echo "GatewayPorts no" >> /etc/ssh/sshd_config
-    echo "AllowStreamLocalForwarding yes" >> /etc/ssh/sshd_config
-    systemctl restart sshd
-fi
-
-# Configure basic firewall
-ufw --force enable
-ufw default deny incoming
-ufw default allow outgoing
-ufw allow 22/tcp
-ufw allow 8080/tcp
-ufw allow 8081/tcp
-ufw allow 8082/tcp
-ufw allow from 10.10.10.0/24
-
-# Verify nginx is listening on the correct ports
-sleep 5
-echo "Nginx status:"
-systemctl status nginx --no-pager
-echo "Listening ports:"
-netstat -tlnp | grep nginx
-
-echo "Bastion VM configuration completed successfully"
-EOF
-
-    # Copy and execute the script on the bastion
-    if scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /tmp/configure_bastion.sh ${BASTION_USER}@10.10.10.100:/tmp/; then
-        if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BASTION_USER}@10.10.10.100 "sudo bash /tmp/configure_bastion.sh"; then
-            log "Bastion VM configured successfully with nginx reverse proxy"
-        else
-            log "WARNING: Failed to configure bastion VM"
-            return 1
-        fi
-    else
-        log "WARNING: Failed to copy configuration script to bastion VM"
-        return 1
-    fi
-    
-    # Clean up
-    rm -f /tmp/configure_bastion.sh
-    
-    # Verify nginx is working on the bastion
-    log "Verifying nginx configuration on bastion..."
-    if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BASTION_USER}@10.10.10.100 "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080" | grep -q "200\|302\|401"; then
-        log "✅ Nginx reverse proxy is working on bastion"
-    else
-        log "⚠️  Nginx may not be responding correctly on bastion"
-    fi
-}
-
-# Cleanup and finalization
-cleanup_and_finalize() {
-    log "Cleanup and finalization..."
-    
-    # APT cache cleanup
-    apt autoremove -y
-    apt autoclean
-    
-    # Log rotation configuration
-    cat > /etc/logrotate.d/safyra << 'EOF'
-/var/log/safyra_install*.log {
-    weekly
-    rotate 4
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 644 root root
-}
-EOF
-    
-    # Update locate database
-    updatedb || true
-    
-    # Generate installation report
-    {
-        echo "=== SAFYRA INSTALLATION REPORT ==="
-        echo "Date: $(date)"
-        echo "Script Version: $SCRIPT_VERSION"
-        echo "Hostname: $(hostname)"
-        echo "Primary IP: $(ip route get 1 | awk '{print $7}' | head -1)"
-        echo "Users created: safyradmin"
-        echo "SSH Port: 8222"
-        echo "Bastion SSH Port: ${BASTION_PORT}"
-        echo "Bastion User: ${BASTION_USER}"
-        echo "Installation logs: $LOG_FILE"
-        echo "Credentials: $SAFYRA_CREDS_FILE"
-        echo "SSH Config Generator: /root/generate-ssh-config.sh"
-        echo "VM Template ID: 9000 (Debian 12 Cloud-Init)"
-        echo "Bastion VM ID: 200 (IP: 10.10.10.100)"
-        echo "===================================="
-        echo "Access Instructions:"
-        echo "1. SSH to bastion: ssh ${BASTION_USER}@${BASTION_HOST} -p ${BASTION_PORT}"
-        echo "2. SSH to Proxmox via bastion: ssh root@10.10.10.1 -p 8222 -o ProxyJump=${BASTION_USER}@${BASTION_HOST}:${BASTION_PORT}"
-        echo "3. Web access (via SSH tunnels):"
-        echo "   - Proxmox UI: http://localhost:8080"
-        echo "   - VM Web 1: http://localhost:8081"
-        echo "   - VM Web 2: http://localhost:8082"
-        echo "===================================="
-    } > /root/safyra_install_report.txt
-    
-    chmod 600 /root/safyra_install_report.txt
-    log "Installation report generated: /root/safyra_install_report.txt"
-}
-
 # Main function
 main() {
     log "=========================================="
@@ -1104,21 +1088,18 @@ main() {
     configure_users
     configure_terraform_user
     configure_firewall
-    setup_vm_infrastructure
     configure_nginx_proxy
     generate_ssh_config
     configure_security
     
     # VM setup (with error handling)
-    if setup_vm_infrastructure; then
-        log "VM infrastructure setup completed"
+    setup_vm_infrastructure
+    log "VM infrastructure setup completed"
         # Wait and configure bastion VM
-        sleep 60  # Give more time for VM to fully boot
-        configure_bastion_vm
-    else
-        log "WARNING: VM infrastructure setup failed, continuing without bastion VM"
-    fi
+    sleep 60  # Give more time for VM to fully boot
+    configure_bastion_vm
     
+
     run_security_audit
     cleanup_and_finalize
     
