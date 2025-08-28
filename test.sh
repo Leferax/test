@@ -435,7 +435,13 @@ echo "Configuring bastion VM..."
 apt update && apt upgrade -y
 
 # Install essential packages including nginx
-apt install -y curl nginx wget git vim htop net-tools fail2ban ufw socat
+apt install -y curl nginx wget git vim htop net-tools fail2ban ufw socat rsyslog
+
+systemctl enable rsyslog
+systemctl start rsyslog
+
+# Generate some initial log entries
+logger -p auth.info "Bastion VM configured - initial log entry"
 
 # Configure nginx as reverse proxy
 cat > /etc/nginx/sites-available/vm-proxy << 'NGINXEOF'
