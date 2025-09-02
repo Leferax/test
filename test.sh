@@ -422,24 +422,103 @@ setup_vm_infrastructure() {
 }
 
 # Terraform user configuration for Proxmox
+# Terraform user configuration for Proxmox - FIXED VERSION
 configure_terraform_user() {
     log "Configuring Terraform user for Proxmox..."
     
     # Create Terraform user with minimal permissions
     if ! pveum user list | grep -q "terraform@pve"; then
-        pveum user add terraform@pve -comment "Terraform Automation User"
-        
-        # Terraform role with restricted permissions
-        pveum role add TerraformRole -privs "VM.Allocate,VM.Audit,Datastore.AllocateSpace,Datastore.Audit,Pool.Allocate,Sys.Audit,Sys.Console,Sys.Modify,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Migrate,VM.Monitor,VM.PowerMgmt,SDN.Use" 2>/dev/null || true
-        
-        pveum aclmod / -user terraform@pve -role TerraformRole
-        
-        # Token generation with secure storage
-        local token_file="/etc/pve/.terraform-token.json"
-        if pveum user token add terraform@pve terraform-token --output-format json > "$token_file"; then
-            log "Terraform token generated and stored securely"
+        log "Terraform user does not exist. Creating it now..."
+        if pveum user add terraform@pve -comment "Terraform Automation User"; then
+            log "Terraform user created successfully"
+        else
+            log "Warning: Failed to create Terraform user. It might already exist or there was another issue."
         fi
+    else
+        log "Terraform user already exists. Skipping user creation."
     fi
+    
+    # Create comprehensive Terraform role with ALL necessary permissions
+    if ! pveum role list | grep -q "TerraformRole"; then
+        log "TerraformRole does not exist. Creating it now..."
+        if pveum role add TerraformRole -privs \
+"VM.Allocate,VM.Audit,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Console,VM.Migrate,VM.Monitor,VM.PowerMgmt,\
+Datastore.Allocate,Datastore.AllocateSpace,Datastore.Audit,\
+Pool.Allocate,Pool.Audit,\
+Sys.Audit,Sys.Console,Sys.Modify,Sys.PowerMgmt,\
+SDN.Use,\
+User.Modify"; then
+            log "TerraformRole created with comprehensive permissions"
+        else
+            log "Warning: Failed to create TerraformRole. It might already exist or there was another issue."
+        fi
+    else
+        log "TerraformRole already exists. Skipping role creation."
+    fi  
+    
+    # Assign role to user with proper path permissions
+    log "Assigning TerraformRole to user..."
+    pveum aclmod / -user terraform@pve -role TerraformRole
+    pveum aclmod /nodes -user terraform@pve -role TerraformRole
+    pveum aclmod /storage -user terraform@pve -role TerraformRole
+    pveum aclmod /pool -user terraform@pve -role TerraformRole
+    
+    # CRITICAL: Add specific permission for VM template 9000
+    pveum aclmod /vms/9000 -user terraform@pve -role TerraformRole
+    log "Specific permissions granted for VM template 9000"
+    
+    # Check if a token with the specific ID already exists
+    local token_exists=0
+    if pveum user token list terraform@pve 2>/dev/null | grep -q "terraform-token"; then
+        token_exists=1
+    fi
+    
+    if [ "$token_exists" -eq 0 ]; then
+        log "Terraform API token does not exist. Generating a new one..."
+        local token_info
+        if token_info=$(pveum user token add terraform@pve terraform-token --privsep 0 --output-format json 2>/dev/null); then
+            local token_value=$(echo "$token_info" | grep -o '"value":"[^"]*"' | cut -d'"' -f4)
+            
+            # Store in secure file with proper format
+            cat > "/root/.terraform-credentials" << EOF
+# Terraform Proxmox Credentials
+# Generated: $(date)
+export TF_VAR_proxmox_api_url="https://localhost:8006/api2/json"
+export TF_VAR_proxmox_user="terraform@pve"
+export TF_VAR_proxmox_token="PVEAPIToken=terraform@pve!terraform-token=${token_value}"
+# Don't set password when using token
+# export TF_VAR_proxmox_password=""
+
+# Usage: source this file before running terraform
+# source /root/.terraform-credentials
+EOF
+            chmod 600 "/root/.terraform-credentials"
+            
+            log "✅ Terraform token generated and stored in /root/.terraform-credentials"
+            log "📋 Token format: PVEAPIToken=terraform@pve!terraform-token=${token_value}"
+            
+            # Test the token
+            log "🧪 Testing token authentication..."
+            if curl -k -H "Authorization: PVEAPIToken=terraform@pve!terraform-token=${token_value}" \
+               "https://localhost:8006/api2/json/version" >/dev/null 2>&1; then
+                log "✅ Token authentication test successful"
+            else
+                log "⚠️ Token authentication test failed"
+            fi
+        else
+            log "❌ Failed to generate token. This could be due to a race condition or a transient error."
+            return 1
+        fi
+    else
+        log "Terraform API token already exists. Skipping token generation."
+        log "Note: If you need to regenerate the token, delete it first with:"
+        log "pveum user token remove terraform@pve terraform-token"
+    fi
+    
+    # Verify permissions are correctly set
+    log "📋 Verifying Terraform user permissions..."
+    pveum user list terraform@pve || log "Warning: User verification failed"
+    pveum acl list | grep "terraform@pve" || log "Warning: No ACL entries found for terraform user"
 }
 
 # Enhanced firewall configuration with NAT rules for bastion
