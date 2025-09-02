@@ -867,8 +867,11 @@ EOF
 # 19. Make rules immutable (disable modifications)
 -e 2
 EOF
-    # Configure dispatcher for real-time alerts
-    cat > /etc/audisp/plugins.d/safyra.conf << 'EOF'
+    # Configure dispatcher for real-time alerts (modern auditd)
+    # Check if audisp directory exists (older systems) or use audispd (newer systems)
+    if [[ -d /etc/audisp/plugins.d/ ]]; then
+        # Older auditd versions
+        cat > /etc/audisp/plugins.d/safyra.conf << 'EOF'
 # SAFYRA Real-time Alert Plugin
 active = yes
 direction = out
@@ -877,6 +880,21 @@ type = always
 args = 
 format = string
 EOF
+    else
+        # Create the directory if it doesn't exist and use modern path
+        mkdir -p /etc/audit/plugins.d/
+        cat > /etc/audit/plugins.d/safyra.conf << 'EOF'
+# SAFYRA Real-time Alert Plugin
+active = yes
+direction = out
+path = /usr/local/bin/safyra-audit-alert
+type = always
+args = 
+format = string
+EOF
+        log "Created audit plugins directory and configured plugin"
+    fi
+
     # Real-time alert script for critical events
     cat > /usr/local/bin/safyra-audit-alert << 'EOF'
 #!/bin/bash
