@@ -867,7 +867,6 @@ EOF
 # 19. Make rules immutable (disable modifications)
 -e 2
 EOF
-    touch /etc/audisp/plugins.d/safyra.conf
     # Configure dispatcher for real-time alerts
     cat > /etc/audisp/plugins.d/safyra.conf << 'EOF'
 # SAFYRA Real-time Alert Plugin
@@ -878,7 +877,6 @@ type = always
 args = 
 format = string
 EOF
-
     # Real-time alert script for critical events
     cat > /usr/local/bin/safyra-audit-alert << 'EOF'
 #!/bin/bash
