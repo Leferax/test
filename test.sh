@@ -188,7 +188,7 @@ options timeout:5 attempts:9
 EOF
     
     # Make resolv.conf immutable to prevent overwriting
-    chattr +i /etc/resolv.conf || log "WARNING: Cannot make resolv.conf immutable"
+#    chattr +i /etc/resolv.conf || log "WARNING: Cannot make resolv.conf immutable"
     
     # Network bridge configuration for virtualization
     if ! grep -q "vmbr1" /etc/network/interfaces; then
