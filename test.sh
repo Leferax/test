@@ -24,78 +24,7 @@ error_exit() {
     log "ERROR: $1"
     exit 1
 }
-# Security audit
-run_security_audit() {
-    log "Running security audit..."
-    
-    # Lynis audit
-    if command -v lynis &> /dev/null; then
-        lynis audit system --quiet > /root/lynis_report.txt 2>&1
-        chmod 600 /root/lynis_report.txt
-        log "Lynis audit report generated: /root/lynis_report.txt"
-    fi
-    
-    # Update antivirus signatures
-    if command -v freshclam &> /dev/null; then
-        freshclam --quiet || log "WARNING: Failed to update ClamAV signatures"
-    fi
-}
 
-
-# Cleanup and finalization
-cleanup_and_finalize() {
-    log "Cleanup and finalization..."
-    
-    # APT cache cleanup
-    apt autoremove -y
-    apt autoclean
-    
-    # Log rotation configuration
-    cat > /etc/logrotate.d/safyra << 'EOF'
-/var/log/safyra_install*.log {
-    weekly
-    rotate 4
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 644 root root
-}
-EOF
-    
-    # Update locate database
-    updatedb || true
-    
-    # Generate installation report
-    {
-        echo "=== SAFYRA INSTALLATION REPORT ==="
-        echo "Date: $(date)"
-        echo "Script Version: $SCRIPT_VERSION"
-        echo "Hostname: $(hostname)"
-        echo "Primary IP: $(ip route get 1 | awk '{print $7}' | head -1)"
-        echo "Users created: safyradmin"
-        echo "SSH Port: 8222"
-        echo "Bastion SSH Port: ${BASTION_PORT}"
-        echo "Bastion User: ${BASTION_USER}"
-        echo "Installation logs: $LOG_FILE"
-        echo "Credentials: $SAFYRA_CREDS_FILE"
-        echo "SSH Config Generator: /root/generate-ssh-config.sh"
-        echo "VM Template ID: 9000 (Debian 12 Cloud-Init)"
-        echo "Bastion VM ID: 200 (IP: 10.10.10.100)"
-        echo "===================================="
-        echo "Access Instructions:"
-        echo "1. SSH to bastion: ssh ${BASTION_USER}@${BASTION_HOST} -p ${BASTION_PORT}"
-        echo "2. SSH to Proxmox via bastion: ssh root@10.10.10.1 -p 8222 -o ProxyJump=${BASTION_USER}@${BASTION_HOST}:${BASTION_PORT}"
-        echo "3. Web access (via SSH tunnels):"
-        echo "   - Proxmox UI: http://localhost:8080"
-        echo "   - VM Web 1: http://localhost:8081"
-        echo "   - VM Web 2: http://localhost:8082"
-        echo "===================================="
-    } > /root/safyra_install_report.txt
-    
-    chmod 600 /root/safyra_install_report.txt
-    log "Installation report generated: /root/safyra_install_report.txt"
-}
 # Prerequisites verification function
 check_prerequisites() {
     log "Checking prerequisites..."
@@ -252,6 +181,12 @@ EOF
 configure_network() {
     log "Configuring network..."
     
+    # DNS configuration with fallback
+    cat > /etc/resolv.conf << 'EOF'
+nameserver 9.9.9.9
+options timeout:5 attempts:9
+EOF
+    
     # Make resolv.conf immutable to prevent overwriting
     chattr +i /etc/resolv.conf || log "WARNING: Cannot make resolv.conf immutable"
     
@@ -328,7 +263,7 @@ EOF
         "wget" "git" "sudo" "curl" "unzip" "gnupg" "software-properties-common"
         "lynis" "clamav" "nftables" "iptables-persistent" "fail2ban"
         "rsyslog" "logrotate" "htop" "tree" "vim" "net-tools"
-        "nginx" "socat" "rsyslog"
+        "nginx" "socat"
     )
     
     for package in "${packages[@]}"; do
@@ -362,6 +297,25 @@ configure_proxmox() {
     pveam download local fedora-41-default_20241118_amd64.tar.xz || log "WARNING: Failed to download Fedora template"
 }
 
+# Enhanced SSH key management
+setup_ssh_keys() {
+    log "Setting up SSH keys..."
+    
+    # Create .ssh directories if they don't exist
+    mkdir -p /root/.ssh
+    chmod 700 /root/.ssh
+    
+    # SSH key for f4ku user (from paste.txt)
+    local f4ku_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDhTyqkUMet5mqtBGTNQhsMerolGh9jcXjX9LteAGvCjD2ZbCav7RA6CTUySHrs+tIL6MNMnyK8E5w6bx/FWTkPnB/CW7TPtVE3TOAnVYm3E2Bys5ZSXh/HH7uG9pKpjAvBXWSaXDgXbcb33u4z1/UP+5ABa73gZfWju0tKdIReUmVjRHi20r+/rta3ujQfn91o+QVrWR3Khsp80M1pSqkABlGbfupZaAhlnM7B82yWvCYq62r4fVaKbFkKfwmfOtW6UlkhWgd5NT1DxCSnCbOFRaKv0EsUDtaae8e7U9LSfBFmYBGLdGuo5jL9IZpssIPL4v8iFjJbFW/wEYakMygfPzt2droXlIhUxSIoBmjJ3paj5egi3mF6CRVIqilvmxMsOeCYdjoo1A/4txQmWwD6zCajm+9b/Iy0h0pMUgpE61sddnkWjChjU73YrKkjJGLF0fzTmKPkGxnQPE1/TQqq06diPyV7UFk1QKgjs+teJZ5l07Lo3sY+SN5BR0azpVM= f4ku@fedora"
+    
+    # Add key to root's authorized_keys if not already present
+    if [[ ! -f /root/.ssh/authorized_keys ]] || ! grep -q "$f4ku_key" /root/.ssh/authorized_keys; then
+        echo "$f4ku_key" >> /root/.ssh/authorized_keys
+        chmod 600 /root/.ssh/authorized_keys
+        log "SSH key added to root authorized_keys"
+    fi
+}
+
 # Secure user management with SSH keys
 configure_users() {
     log "Configuring users..."
@@ -380,7 +334,8 @@ configure_users() {
         chmod 700 /home/safyradmin/.ssh
         
         # Copy the same SSH key to safyradmin
-        cp ~/.ssh/authorized_keys /home/safyradmin/.ssh/authorized_keys
+        local f4ku_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDhTyqkUMet5mqtBGTNQhsMerolGh9jcXjX9LteAGvCjD2ZbCav7RA6CTUySHrs+tIL6MNMnyK8E5w6bx/FWTkPnB/CW7TPtVE3TOAnVYm3E2Bys5ZSXh/HH7uG9pKpjAvBXWSaXDgXbcb33u4z1/UP+5ABa73gZfWju0tKdIReUmVjRHi20r+/rta3ujQfn91o+QVrWR3Khsp80M1pSqkABlGbfupZaAhlnM7B82yWvCYq62r4fVaKbFkKfwmfOtW6UlkhWgd5NT1DxCSnCbOFRaKv0EsUDtaae8e7U9LSfBFmYBGLdGuo5jL9IZpssIPL4v8iFjJbFW/wEYakMygfPzt2droXlIhUxSIoBmjJ3paj5egi3mF6CRVIqilvmxMsOeCYdjoo1A/4txQmWwD6zCajm+9b/Iy0h0pMUgpE61sddnkWjChjU73YrKkjJGLF0fzTmKPkGxnQPE1/TQqq06diPyV7UFk1QKgjs+teJZ5l07Lo3sY+SN5BR0azpVM= f4ku@fedora"
+        echo "$f4ku_key" > /home/safyradmin/.ssh/authorized_keys
         chmod 600 /home/safyradmin/.ssh/authorized_keys
         chown -R safyradmin:safyradmin /home/safyradmin/.ssh
         
@@ -395,6 +350,646 @@ configure_users() {
         chmod 600 "$SAFYRA_CREDS_FILE"
         
         log "User safyradmin created with secure password and SSH key"
+    fi
+}
+
+# VM Template creation and bastion setup
+setup_vm_infrastructure() {
+    log "Setting up VM infrastructure..."
+    
+    # Wait for Proxmox to be ready
+    sleep 30
+    
+    # Download Debian cloud image
+    cd /tmp
+    if [[ ! -f debian-12-generic-amd64.qcow2 ]]; then
+        wget https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2 || {
+            log "WARNING: Failed to download Debian cloud image"
+            return 1
+        }
+    fi
+    
+    # Create VM template if it doesn't exist
+    if ! qm list | grep -q "9000"; then
+        log "Creating Debian 12 cloud-init template..."
+        
+        # Create the template VM
+        qm create 9000 --name debian-12-cloudinit-template --memory 2048 --cores 2 --net0 virtio,bridge=vmbr1
+        
+        # Import disk
+        qm importdisk 9000 debian-12-generic-amd64.qcow2 local
+        
+        # Configure template
+        qm set 9000 --scsihw virtio-scsi-pci --scsi0 local:9000/vm-9000-disk-0.raw
+        qm set 9000 --ide2 local:cloudinit
+        qm set 9000 --boot c --bootdisk scsi0
+        qm set 9000 --serial0 socket --vga serial0
+        
+        # Convert to template
+        qm template 9000
+        
+        log "VM template 9000 created successfully"
+    fi
+    
+    # Create bastion VM if it doesn't exist
+    if ! qm list | grep -q "200"; then
+        log "Creating bastion VM..."
+        
+        # Clone template for bastion
+        qm clone 9000 200 --name bastion-safyra --full
+        
+        # Configure bastion VM
+        qm set 200 \
+            --memory 4096 \
+            --cores 2 \
+            --onboot 1 \
+            --ciuser ${BASTION_USER} \
+            --ipconfig0 ip=10.10.10.100/24,gw=10.10.10.1 \
+            --nameserver 9.9.9.9 \
+            --sshkeys /root/.ssh/authorized_keys
+        
+        # Resize disk to 32GB
+        qm resize 200 scsi0 32G
+        
+        # Start the VM
+        qm start 200
+        
+        log "Bastion VM 200 created and started"
+    fi
+    
+    # Clean up
+    rm -f /tmp/debian-12-generic-amd64.qcow2
+}
+
+# Terraform user configuration for Proxmox
+configure_terraform_user() {
+    log "Configuring Terraform user for Proxmox..."
+    
+    # Create Terraform user with minimal permissions
+    if ! pveum user list | grep -q "terraform@pve"; then
+        pveum user add terraform@pve -comment "Terraform Automation User"
+        
+        # Terraform role with restricted permissions
+        pveum role add TerraformRole -privs "VM.Allocate,VM.Audit,Datastore.AllocateSpace,Datastore.Audit,Pool.Allocate,Sys.Audit,Sys.Console,Sys.Modify,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Migrate,VM.Monitor,VM.PowerMgmt,SDN.Use" 2>/dev/null || true
+        
+        pveum aclmod / -user terraform@pve -role TerraformRole
+        
+        # Token generation with secure storage
+        local token_file="/etc/pve/.terraform-token.json"
+        if pveum user token add terraform@pve terraform-token --output-format json > "$token_file"; then
+            log "Terraform token generated and stored securely"
+        fi
+    fi
+}
+
+# Enhanced firewall configuration with NAT rules for bastion
+configure_firewall() {
+    log "Configuring firewall with persistent rules and NAT for bastion..."
+    
+    # Basic iptables configuration
+    iptables -F
+    iptables -X
+    iptables -t nat -F
+    iptables -t nat -X
+    
+    # Restrictive default policy
+    iptables -P INPUT DROP
+    iptables -P FORWARD DROP
+    iptables -P OUTPUT ACCEPT
+    
+    # Allow loopback
+    iptables -A INPUT -i lo -j ACCEPT
+    iptables -A OUTPUT -o lo -j ACCEPT
+    
+    # Allow established and related connections
+    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    
+    # SSH on custom port
+    iptables -A INPUT -p tcp --dport 8222 -m state --state NEW,ESTABLISHED -j ACCEPT
+    
+    # Proxmox Web Interface
+    iptables -A INPUT -p tcp --dport 8006 -m state --state NEW,ESTABLISHED -j ACCEPT
+    
+    # HTTP/HTTPS for updates
+    iptables -A INPUT -p tcp --dport 80 -m state --state NEW,ESTABLISHED -j ACCEPT
+    iptables -A INPUT -p tcp --dport 443 -m state --state NEW,ESTABLISHED -j ACCEPT
+    
+    # Limited ICMP (ping)
+    iptables -A INPUT -p icmp --icmp-type echo-request -m limit --limit 1/s -j ACCEPT
+    
+    # NAT for internal network (general)
+    iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o vmbr0 -j MASQUERADE
+    iptables -A FORWARD -s 10.10.10.0/24 -o vmbr0 -j ACCEPT
+    iptables -A FORWARD -d 10.10.10.0/24 -i vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+    
+    # NAT rules for bastion access
+    # SSH to bastion
+    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 2222 -j DNAT --to-destination 10.10.10.100:22
+    iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 22 -j ACCEPT
+    
+    # Web interfaces through bastion
+    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 8080 -j DNAT --to-destination 10.10.10.100:8080
+    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 8081 -j DNAT --to-destination 10.10.10.100:8081
+    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 8082 -j DNAT --to-destination 10.10.10.100:8082
+    
+    iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 8080 -j ACCEPT
+    iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 8081 -j ACCEPT
+    iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 8082 -j ACCEPT
+    
+    # Protection against common attacks
+    iptables -A INPUT -m recent --name blacklist --set -j DROP
+    iptables -A INPUT -p tcp --dport 8222 -m recent --name ssh --set
+    iptables -A INPUT -p tcp --dport 8222 -m recent --name ssh --rcheck --seconds 60 --hitcount 4 -j DROP
+    
+    # Save rules for persistence
+    if command -v iptables-save &> /dev/null; then
+        iptables-save > /etc/iptables/rules.v4
+        log "IPv4 iptables rules saved"
+    fi
+    
+    # Configure for persistence on reboot
+    systemctl enable netfilter-persistent || true
+}
+
+# Configure Nginx as reverse proxy for bastion
+configure_nginx_proxy() {
+    log "Configuring Nginx reverse proxy..."
+    
+    # Create nginx configuration for VM proxy
+    cat > /etc/nginx/sites-available/vm-proxy << 'EOF'
+# Proxmox Web UI
+server {
+    listen 8080;
+    server_name _;
+
+    location / {
+        proxy_pass https://10.10.10.1:8006;
+        proxy_ssl_verify off;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # WebSocket support for Proxmox
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_buffering off;
+    }
+}
+
+# Template for future VMs - example VM web on 10.10.10.101:80
+server {
+    listen 8081;
+    server_name _;
+
+    location / {
+        proxy_pass http://10.10.10.101:80;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# Template for VM with HTTPS interface - example on 10.10.10.102:443
+server {
+    listen 8082;
+    server_name _;
+
+    location / {
+        proxy_pass https://10.10.10.102:443;
+        proxy_ssl_verify off;
+        proxy_set_header Host $host:$server_port;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+
+    # Remove default nginx sites and enable our proxy
+    rm -f /etc/nginx/sites-enabled/*
+    ln -s /etc/nginx/sites-available/vm-proxy /etc/nginx/sites-enabled/
+    
+    # Test nginx configuration
+    if nginx -t; then
+        systemctl restart nginx
+        systemctl enable nginx
+        log "Nginx reverse proxy configured successfully"
+    else
+        log "WARNING: Nginx configuration test failed"
+    fi
+}
+
+# Generate SSH client configuration helper
+generate_ssh_config() {
+    log "Generating SSH client configuration..."
+    
+    cat > /root/generate-ssh-config.sh << EOF
+#!/bin/bash
+
+BASTION_HOST="${BASTION_HOST}"
+BASTION_PORT="${BASTION_PORT}"
+BASTION_USER="${BASTION_USER}"
+
+cat > /root/ssh-client-config << SSHEOF
+# Configuration SSH pour Safyra
+# Copiez ce contenu dans votre fichier ~/.ssh/config
+
+Host safyra-bastion
+    HostName \${BASTION_HOST}
+    Port \${BASTION_PORT}
+    User \${BASTION_USER}
+    # Tunnels automatiques vers les interfaces web
+    LocalForward 8080 localhost:8080  # Proxmox Web UI
+    LocalForward 8081 localhost:8081  # VM Web 1
+    LocalForward 8082 localhost:8082  # VM Web 2
+
+Host safyra-proxmox
+    HostName 10.10.10.1
+    Port 8222
+    User root
+    ProxyJump safyra-bastion
+
+# Alias rapides
+Host pve
+    HostName 10.10.10.1
+    Port 8222
+    User root
+    ProxyJump safyra-bastion
+
+Host bastion
+    HostName \${BASTION_HOST}
+    Port \${BASTION_PORT}
+    User \${BASTION_USER}
+SSHEOF
+
+echo "Configuration SSH générée dans /root/ssh-client-config"
+echo ""
+echo "=== Instructions pour le client ==="
+echo "1. Téléchargez le fichier:"
+echo "   scp \${BASTION_USER}@\${BASTION_HOST}:\${BASTION_PORT}/root/ssh-client-config ~/.ssh/config-safyra"
+echo ""
+echo "2. Ajoutez le contenu à votre ~/.ssh/config:"
+echo "   cat ~/.ssh/config-safyra >> ~/.ssh/config"
+echo ""
+echo "3. Connectez-vous avec les tunnels:"
+echo "   ssh safyra-bastion"
+echo ""
+echo "4. Accédez aux interfaces web:"
+echo "   http://localhost:8080  -> Proxmox"
+echo "   http://localhost:8081  -> VM Web 1"
+echo "   http://localhost:8082  -> VM Web 2"
+EOF
+
+    chmod +x /root/generate-ssh-config.sh
+    
+    # Generate the configuration immediately with proper variable substitution
+    cat > /root/ssh-client-config << EOF
+# Configuration SSH pour Safyra
+# Copiez ce contenu dans votre fichier ~/.ssh/config
+
+Host safyra-bastion
+    HostName ${BASTION_HOST}
+    Port ${BASTION_PORT}
+    User ${BASTION_USER}
+    # Tunnels automatiques vers les interfaces web
+    LocalForward 8080 localhost:8080  # Proxmox Web UI
+    LocalForward 8081 localhost:8081  # VM Web 1
+    LocalForward 8082 localhost:8082  # VM Web 2
+
+Host safyra-proxmox
+    HostName 10.10.10.1
+    Port 8222
+    User root
+    ProxyJump safyra-bastion
+
+# Alias rapides
+Host pve
+    HostName 10.10.10.1
+    Port 8222
+    User root
+    ProxyJump safyra-bastion
+
+Host bastion
+    HostName ${BASTION_HOST}
+    Port ${BASTION_PORT}
+    User ${BASTION_USER}
+EOF
+    
+    log "SSH client configuration generated at /root/ssh-client-config"
+}
+
+# System security configuration
+configure_security() {
+    log "Configuring system security with comprehensive audit rules..."
+    
+    # System audit configuration
+    if systemctl is-active --quiet auditd; then
+        log "auditd service already active"
+    else
+        systemctl enable auditd
+        systemctl start auditd
+        log "auditd service enabled and started"
+    fi
+    
+    # Main auditd configuration
+    cat > /etc/audit/auditd.conf << 'EOF'
+# SAFYRA Audit Configuration
+# Main audit configuration for SAFYRA environment
+
+# Log location and format
+log_file = /var/log/audit/audit.log
+log_format = RAW
+log_group = adm
+
+# Log size and rotation settings
+max_log_file = 100
+num_logs = 10
+max_log_file_action = ROTATE
+
+# Actions when low on disk space
+space_left = 500
+space_left_action = SYSLOG
+admin_space_left = 100
+admin_space_left_action = SUSPEND
+
+# Actions on disk errors
+disk_full_action = SUSPEND
+disk_error_action = SUSPEND
+
+# Performance and security settings
+freq = 50
+flush = INCREMENTAL_ASYNC
+verify_email = yes
+name_format = HOSTNAME
+priority_boost = 4
+
+# Dispatcher for centralization (optional)
+dispatcher = /sbin/audispd
+disp_qos = lossy
+EOF
+
+    # SAFYRA-specific audit rules
+    cat > /etc/audit/rules.d/safyra-audit.rules << 'EOF'
+# SAFYRA Comprehensive Audit Rules
+# Complete audit rules for SAFYRA environment
+# Auto-generated by SAFYRA installation script
+
+# Delete existing rules
+-D
+
+# Buffer configuration
+-b 8192
+
+# Fail if unable to load rules
+-f 1
+
+# ==== CRITICAL SYSTEM MONITORING ====
+
+# 1. Monitor critical system files
+-w /etc/passwd -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/security/opasswd -p wa -k identity
+
+# 2. Monitor authorization system
+-w /etc/sudoers -p wa -k privilege-escalation
+-w /etc/sudoers.d/ -p wa -k privilege-escalation
+
+# 3. Monitor network configuration (critical for Proxmox)
+-w /etc/network/interfaces -p wa -k network-config
+-w /etc/hosts -p wa -k network-config
+-w /etc/hostname -p wa -k network-config
+-w /etc/resolv.conf -p wa -k network-config
+
+# 4. Monitor SSH (custom port 8222)
+-w /etc/ssh/sshd_config -p wa -k ssh-config
+-w /etc/ssh/sshd_config.d/ -p wa -k ssh-config
+-w /root/.ssh/ -p wa -k ssh-keys
+-w /home/safyradmin/.ssh/ -p wa -k ssh-keys
+
+# ==== PROXMOX SPECIFIC MONITORING ====
+
+# 5. Proxmox configuration
+-w /etc/pve/ -p wa -k proxmox-config
+-w /etc/default/pveproxy -p wa -k proxmox-proxy
+
+# 6. VM and container monitoring
+-w /var/lib/vz/ -p wa -k vm-storage
+-w /etc/pve/qemu-server/ -p wa -k vm-config
+-w /etc/pve/lxc/ -p wa -k container-config
+
+# 7. Monitor certificates and keys
+-w /etc/pve/priv/ -p wa -k proxmox-certs
+-w /etc/ssl/certs/ -p wa -k ssl-certs
+-w /etc/ssl/private/ -p wa -k ssl-private
+
+# ==== NGINX & REVERSE PROXY MONITORING ====
+
+# 8. Nginx configuration (used for reverse proxy)
+-w /etc/nginx/nginx.conf -p wa -k nginx-config
+-w /etc/nginx/sites-available/ -p wa -k nginx-sites
+-w /etc/nginx/sites-enabled/ -p wa -k nginx-sites
+
+# ==== SYSTEM SECURITY MONITORING ====
+
+# 9. Monitor login attempts
+-w /var/log/auth.log -p wa -k auth-logs
+-w /var/log/secure -p wa -k auth-logs
+
+# 10. Monitor service modifications
+-w /etc/systemd/system/ -p wa -k systemd-config
+-w /lib/systemd/system/ -p wa -k systemd-config
+
+# 11. Monitor firewall
+-w /etc/iptables/ -p wa -k firewall-config
+-a always,exit -F arch=b64 -S socket -F a0=10 -k network-socket-creation
+-a always,exit -F arch=b32 -S socket -F a0=10 -k network-socket-creation
+
+# ==== SENSITIVE COMMANDS MONITORING ====
+
+# 12. System administration commands
+-a always,exit -F arch=b64 -S mount -F auid>=1000 -F auid!=4294967295 -k mount
+-a always,exit -F arch=b32 -S mount -F auid>=1000 -F auid!=4294967295 -k mount
+-a always,exit -F arch=b64 -S umount2 -F auid>=1000 -F auid!=4294967295 -k mount
+-a always,exit -F arch=b32 -S umount -F auid>=1000 -F auid!=4294967295 -k mount
+-a always,exit -F arch=b32 -S umount2 -F auid>=1000 -F auid!=4294967295 -k mount
+
+# 13. Monitor permission modifications
+-a always,exit -F arch=b64 -S chmod -F auid>=1000 -F auid!=4294967295 -k perm_mod
+-a always,exit -F arch=b32 -S chmod -F auid>=1000 -F auid!=4294967295 -k perm_mod
+-a always,exit -F arch=b64 -S chown -F auid>=1000 -F auid!=4294967295 -k perm_mod
+-a always,exit -F arch=b32 -S chown -F auid>=1000 -F auid!=4294967295 -k perm_mod
+-a always,exit -F arch=b64 -S fchmod -F auid>=1000 -F auid!=4294967295 -k perm_mod
+-a always,exit -F arch=b32 -S fchmod -F auid>=1000 -F auid!=4294967295 -k perm_mod
+-a always,exit -F arch=b64 -S fchown -F auid>=1000 -F auid!=4294967295 -k perm_mod
+-a always,exit -F arch=b32 -S fchown -F auid>=1000 -F auid!=4294967295 -k perm_mod
+
+# ==== PROXMOX COMMANDS MONITORING ====
+
+# 14. Critical Proxmox commands
+-a always,exit -F path=/usr/bin/qm -F perm=x -F auid>=1000 -F auid!=4294967295 -k proxmox-vm
+-a always,exit -F path=/usr/bin/pct -F perm=x -F auid>=1000 -F auid!=4294967295 -k proxmox-container
+-a always,exit -F path=/usr/bin/pveum -F perm=x -F auid>=1000 -F auid!=4294967295 -k proxmox-user
+-a always,exit -F path=/usr/bin/pvesh -F perm=x -F auid>=1000 -F auid!=4294967295 -k proxmox-shell
+
+# ==== TERRAFORM MONITORING ====
+
+# 15. Monitor Terraform actions (for automation)
+-a always,exit -F path=/usr/bin/terraform -F perm=x -F auid>=1000 -F auid!=4294967295 -k terraform
+-w /root/.terraform.d/ -p wa -k terraform-config
+
+# ==== SENSITIVE PROCESS MONITORING ====
+
+# 16. Monitor critical daemon processes
+-a always,exit -F arch=b64 -S execve -F path=/usr/sbin/sshd -k ssh-daemon
+-a always,exit -F arch=b32 -S execve -F path=/usr/sbin/sshd -k ssh-daemon
+-a always,exit -F arch=b64 -S execve -F path=/usr/sbin/nginx -k nginx-daemon
+-a always,exit -F arch=b32 -S execve -F path=/usr/sbin/nginx -k nginx-daemon
+
+# ==== SENSITIVE FILE ACCESS MONITORING ====
+
+# 17. Monitor system logs
+-w /var/log/messages -p wa -k system-logs
+-w /var/log/syslog -p wa -k system-logs
+-w /var/log/daemon.log -p wa -k daemon-logs
+
+# 18. Monitor security configurations
+-w /etc/fail2ban/ -p wa -k fail2ban-config
+-w /etc/iptables/rules.v4 -p wa -k iptables-rules
+-w /etc/iptables/rules.v6 -p wa -k iptables-rules
+
+# ==== FINALIZATION ====
+
+# 19. Make rules immutable (disable modifications)
+-e 2
+EOF
+
+    # Configure dispatcher for real-time alerts
+    cat > /etc/audisp/plugins.d/safyra.conf << 'EOF'
+# SAFYRA Real-time Alert Plugin
+active = yes
+direction = out
+path = /usr/local/bin/safyra-audit-alert
+type = always
+args = 
+format = string
+EOF
+
+    # Real-time alert script for critical events
+    cat > /usr/local/bin/safyra-audit-alert << 'EOF'
+#!/bin/bash
+# SAFYRA Audit Alert Script
+# Real-time processing of critical audit events
+
+LOG_FILE="/var/log/safyra-security-alerts.log"
+CRITICAL_EVENTS=("ssh-config" "proxmox-config" "privilege-escalation" "network-config")
+
+while read line; do
+    # Check if event contains critical keywords
+    for event in "${CRITICAL_EVENTS[@]}"; do
+        if echo "$line" | grep -q "$event"; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] CRITICAL AUDIT EVENT: $line" >> "$LOG_FILE"
+            # Optional: send alert via email or webhook
+            # curl -X POST -H "Content-Type: application/json" \
+            #      -d "{\"text\":\"SAFYRA Security Alert: $line\"}" \
+            #      YOUR_WEBHOOK_URL
+            break
+        fi
+    done
+done
+EOF
+
+    chmod +x /usr/local/bin/safyra-audit-alert
+
+    # Configure audit log rotation
+    cat > /etc/logrotate.d/safyra-audit << 'EOF'
+/var/log/audit/audit.log {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    notifempty
+    create 640 root adm
+    postrotate
+        /sbin/service auditd restart 2>/dev/null || true
+    endscript
+}
+
+/var/log/safyra-security-alerts.log {
+    daily
+    rotate 90
+    compress
+    delaycompress
+    notifempty
+    create 644 root root
+}
+EOF
+
+    # Restart auditd to apply new rules
+    log "Reloading audit rules..."
+    if systemctl restart auditd; then
+        log "✅ Audit rules loaded successfully"
+    else
+        log "⚠️ Warning: Failed to restart auditd, trying to reload rules manually"
+        auditctl -R /etc/audit/rules.d/safyra-audit.rules || true
+    fi
+
+    # Verify applied rules
+    log "Verifying audit rules..."
+    RULES_COUNT=$(auditctl -l | wc -l)
+    log "📊 Active audit rules: $RULES_COUNT"
+    
+    # Fail2Ban configuration for SSH
+    cat > /etc/fail2ban/jail.local << 'EOF'
+[sshd]
+enabled = true
+port = 8222
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 3600
+findtime = 600
+
+[nginx-http-auth]
+enabled = true
+port = 8080,8081,8082
+logpath = /var/log/nginx/error.log
+maxretry = 5
+bantime = 3600
+findtime = 600
+EOF
+    
+    systemctl enable fail2ban
+    systemctl start fail2ban
+    
+    # More restrictive default permissions
+    sed -i 's/^UMASK.*/UMASK\t027/' /etc/login.defs
+    
+    # Disable unnecessary system accounts
+    for user in games news uucp proxy www-data backup list irc gnats nobody; do
+        if id "$user" &>/dev/null; then
+            usermod -L -s /bin/false "$user" 2>/dev/null || true
+        fi
+    done
+}
+
+# Security audit
+run_security_audit() {
+    log "Running security audit..."
+    
+    # Lynis audit
+    if command -v lynis &> /dev/null; then
+        lynis audit system > /root/lynis_report.txt 2>&1 
+        chmod 600 /root/lynis_report.txt
+        log "Lynis audit report generated: /root/lynis_report.txt"
+    fi
+    
+    # Update antivirus signatures
+    if command -v freshclam &> /dev/null; then
+        freshclam || log "WARNING: Failed to update ClamAV signatures"
     fi
 }
 
@@ -435,13 +1030,7 @@ echo "Configuring bastion VM..."
 apt update && apt upgrade -y
 
 # Install essential packages including nginx
-apt install -y curl nginx wget git vim htop net-tools fail2ban ufw socat rsyslog
-
-systemctl enable rsyslog
-systemctl start rsyslog
-
-# Generate some initial log entries
-logger -p auth.info "Bastion VM configured - initial log entry"
+apt install -y curl nginx wget git vim htop net-tools fail2ban ufw socat auditd
 
 # Configure nginx as reverse proxy
 cat > /etc/nginx/sites-available/vm-proxy << 'NGINXEOF'
@@ -541,8 +1130,8 @@ echo "Bastion VM configuration completed successfully"
 EOF
 
     # Copy and execute the script on the bastion
-    if scp -v -o StrictHostKeyChecking=no /tmp/configure_bastion.sh safyradmin@10.10.10.100:/tmp/; then
-        if ssh -v -o StrictHostKeyChecking=no safyradmin@10.10.10.100 "sudo bash /tmp/configure_bastion.sh"; then
+    if scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null /tmp/configure_bastion.sh ${BASTION_USER}@10.10.10.100:/tmp/; then
+        if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${BASTION_USER}@10.10.10.100 "sudo bash /tmp/configure_bastion.sh"; then
             log "Bastion VM configured successfully with nginx reverse proxy"
         else
             log "WARNING: Failed to configure bastion VM"
@@ -554,7 +1143,7 @@ EOF
     fi
     
     # Clean up
-    #rm -f /tmp/configure_bastion.sh
+    rm -f /tmp/configure_bastion.sh
     
     # Verify nginx is working on the bastion
     log "Verifying nginx configuration on bastion..."
@@ -565,517 +1154,59 @@ EOF
     fi
 }
 
-# VM Template creation and bastion setup
-setup_vm_infrastructure() {
-    log "Setting up VM infrastructure..."
-
-    # Wait for Proxmox to be ready
-    sleep 30
-
-    # Download Debian cloud image
-    cd /tmp
-    if [[ ! -f debian-12-generic-amd64.qcow2 ]]; then
-        wget https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2 || {
-            log "WARNING: Failed to download Debian cloud image"
-            return 1
-        }
-    fi
-
-    # Create VM template if it doesn't exist
-    if ! qm list | grep -q "9000"; then
-        log "Creating Debian 12 cloud-init template..."
-
-        # Create the template VM
-        qm create 9000 --name debian-12-cloudinit-template --memory 2048 --cores 2 --net0 virtio,bridge=vmbr1
-
-        # Import disk
-        log "Importing disk..."
-        qm importdisk 9000 debian-12-generic-amd64.qcow2 local
-        
-        # Wait for import to complete
-        sleep 5
-        
-        # Find the imported disk name (could be .raw or .qcow2)
-        DISK_NAME=""
-        if [[ -f /var/lib/vz/images/9000/vm-9000-disk-0.raw ]]; then
-            DISK_NAME="vm-9000-disk-0.raw"
-        elif [[ -f /var/lib/vz/images/9000/vm-9000-disk-0.qcow2 ]]; then
-            DISK_NAME="vm-9000-disk-0.qcow2"
-        else
-            # Try to find any disk file
-            DISK_NAME=$(ls /var/lib/vz/images/9000/ 2>/dev/null | grep -E "vm-9000-disk-[0-9]+\.(raw|qcow2)" | head -1)
-        fi
-        
-        if [[ -z "$DISK_NAME" ]]; then
-            log "ERROR: No disk found after import, check /var/lib/vz/images/9000/"
-            return 1
-        fi
-        
-        log "Found imported disk: $DISK_NAME"
-
-        # Configure template with the correct disk name
-        qm set 9000 --scsihw virtio-scsi-pci --scsi0 local:9000/${DISK_NAME}
-        qm set 9000 --ide2 local:cloudinit
-        qm set 9000 --boot order=scsi0
-        qm set 9000 --serial0 socket --vga serial0
-        
-        # Verify disk is attached before converting to template
-        if ! qm config 9000 | grep -q "scsi0:"; then
-            log "ERROR: Disk not properly attached to template"
-            # Try to fix if disk is in unused state
-            if qm config 9000 | grep -q "unused0:"; then
-                log "Attempting to fix unused disk..."
-                UNUSED_DISK=$(qm config 9000 | grep "unused0:" | cut -d' ' -f2)
-                qm set 9000 --scsi0 ${UNUSED_DISK} --scsihw virtio-scsi-pci
-            else
-                return 1
-            fi
-        fi
-
-        # Convert to template
-        qm template 9000
-
-        log "VM template 9000 created successfully"
-    fi
-
-    # Create bastion VM if it doesn't exist
-    if ! qm list | grep -q "200"; then
-        log "Creating bastion VM..."
-
-        # Clone template for bastion
-        qm clone 9000 200 --name bastion-safyra --full
-        
-        # Verify clone has disk
-        if ! qm config 200 | grep -q "scsi0:"; then
-            log "ERROR: Clone doesn't have disk attached"
-            return 1
-        fi
-        BASTION_VM_PASSWORD=$(openssl rand -base64 12)
-        echo "BASTION_VM_PASSWORD=${BASTION_VM_PASSWORD}" >> /root/.safyra_credentials
-        # Configure bastion VM
-        qm set 200 \
-            --memory 4096 \
-            --cores 2 \
-            --onboot 1 \
-            --ciuser ${BASTION_USER} \
-            --ipconfig0 ip=10.10.10.100/24,gw=10.10.10.1 \
-            --nameserver 9.9.9.9 \
-            --cipassword "${BASTION_VM_PASSWORD}" 
-
-        # Add SSH keys if they exist
-        qm set 200 --sshkeys /root/.ssh/authorized_keys
-        log "SSH keys added to bastion VM"
-        qm stop 200
-        qemu-img resize /var/lib/vz/images/200/vm-200-disk-0.raw 32G
-        qm rescan
-        qm start 200
-        log "Bastion VM 200 created and started"
-        log "Waiting 90 seconds for cloud-init..."
-        sleep 90
-        
-        # Test connectivity
-        if ping -c 3 10.10.10.100 &>/dev/null; then
-            log "Bastion VM is reachable at 10.10.10.100"
-        else
-            log "Bastion VM not responding to ping yet"
-        fi
-    fi
-
-    # Clean up
-    rm -f /tmp/debian-12-generic-amd64.qcow2
+# Cleanup and finalization
+cleanup_and_finalize() {
+    log "Cleanup and finalization..."
+    
+    # APT cache cleanup
+    apt autoremove -y
+    apt autoclean
+    
+    # Log rotation configuration
+    cat > /etc/logrotate.d/safyra << 'EOF'
+/var/log/safyra_install*.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 644 root root
 }
-
-# Terraform user configuration for Proxmox
-configure_terraform_user() {
-    log "Configuring Terraform user for Proxmox..."
-    
-    # Create Terraform user with minimal permissions
-    if ! pveum user list | grep -q "terraform@pve"; then
-        log "Terraform user does not exist. Creating it now..."
-        if pveum user add terraform@pve -comment "Terraform Automation User"; then
-            log "Terraform user created successfully"
-        else
-            log "Warning: Failed to create Terraform user. It might already exist or there was another issue."
-        fi
-    else
-        log "Terraform user already exists. Skipping user creation."
-    fi
-    
-    # Create comprehensive Terraform role
-    if ! pveum role list | grep -q "TerraformRole"; then
-        log "TerraformRole does not exist. Creating it now..."
-        if pveum role add TerraformRole -privs \
-"VM.Allocate,VM.Audit,VM.Clone,VM.Config.CDROM,VM.Config.CPU,VM.Config.Cloudinit,VM.Config.Disk,VM.Config.HWType,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Console,VM.Migrate,VM.Monitor,VM.PowerMgmt,\
-Datastore.Allocate,Datastore.AllocateSpace,Datastore.Allocate,Datastore.Audit,\
-Pool.Allocate,Pool.Audit,\
-Sys.Audit,Sys.Console,Sys.Modify,Sys.PowerMgmt,\
-SDN.Use,\
-User.Modify"; then
-            log "TerraformRole created with comprehensive permissions"
-        else
-            log "Warning: Failed to create TerraformRole. It might already exist or there was another issue."
-        fi
-    else
-        log "TerraformRole already exists. Skipping role creation."
-    fi  
-    
-    # Assign role to user with proper path permissions
-    log "Assigning TerraformRole to user..."
-    pveum aclmod / -user terraform@pve -role TerraformRole
-    pveum aclmod /nodes -user terraform@pve -role TerraformRole
-    pveum aclmod /storage -user terraform@pve -role TerraformRole
-    pveum aclmod /pool -user terraform@pve -role TerraformRole
-    log "Roles assigned."
-    
-    # Check if a token with the specific ID already exists
-    local token_exists=0
-    if pveum user token list terraform@pve | grep -q "terraform-token"; then
-        token_exists=1
-    fi
-    
-    if [ "$token_exists" -eq 0 ]; then
-        log "Terraform API token does not exist. Generating a new one..."
-        local token_info
-        if token_info=$(pveum user token add terraform@pve terraform-token --privsep 0 --output-format json 2>/dev/null); then
-            local token_value=$(echo "$token_info" | grep -o '"value":"[^"]*"' | cut -d'"' -f4)
-            
-            # Store in secure file
-            cat > "/root/.terraform-credentials" << EOF
-# Terraform Proxmox Credentials
-# Generated: $(date)
-export TF_VAR_proxmox_token="PVEAPIToken=terraform@pve!terraform-token=${token_value}"
-export TF_VAR_proxmox_user="terraform@pve"
-# Don't set password when using token
-# export TF_VAR_proxmox_password=""
-EOF
-            chmod 600 "/root/.terraform-credentials"
-            
-            log "✅ Terraform token generated and stored in /root/.terraform-credentials"
-            log "📋 Token format: PVEAPIToken=terraform@pve!terraform-token=${token_value}"
-            
-            # Test the token
-            log "🧪 Testing token authentication..."
-            if curl -k -H "Authorization: PVEAPIToken=terraform@pve!terraform-token=${token_value}" \
-               "https://localhost:8006/api2/json/version" >/dev/null 2>&1; then
-                log "✅ Token authentication test successful"
-            else
-                log "⚠️ Token authentication test failed"
-            fi
-        else
-            log "❌ Failed to generate token. This could be due to a race condition or a transient error."
-            return 1
-        fi
-    else
-        log "Terraform API token already exists. Skipping token generation."
-        # Because we can't use tokenid, we assume the token is valid and don't try to retrieve its value or test it
-        log "Note: Unable to re-authenticate with the existing token on this Proxmox version."
-        log "The script will proceed, assuming the existing token is configured correctly."
-    fi
-}
-# Enhanced firewall configuration with NAT rules for bastion
-configure_firewall() {
-    log "Configuring firewall with persistent rules and NAT for bastion..."
-    
-    # Basic iptables configuration
-    iptables -F
-    iptables -X
-    iptables -t nat -F
-    iptables -t nat -X
-    
-    # Restrictive default policy
-    iptables -P INPUT DROP
-    iptables -P FORWARD DROP
-    iptables -P OUTPUT ACCEPT
-    
-    # Allow loopback
-    iptables -A INPUT -i lo -j ACCEPT
-    iptables -A OUTPUT -o lo -j ACCEPT
-    
-    # Allow established and related connections
-    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-    
-    # SSH on custom port
-    iptables -A INPUT -p tcp --dport 8222 -m state --state NEW,ESTABLISHED -j ACCEPT
-    
-    # Proxmox Web Interface
-    iptables -A INPUT -p tcp --dport 8006 -m state --state NEW,ESTABLISHED -j ACCEPT
-    
-    # HTTP/HTTPS for updates
-    iptables -A INPUT -p tcp --dport 80 -m state --state NEW,ESTABLISHED -j ACCEPT
-    iptables -A INPUT -p tcp --dport 443 -m state --state NEW,ESTABLISHED -j ACCEPT
-    
-    # Limited ICMP (ping)
-    iptables -A INPUT -p icmp --icmp-type echo-request -m limit --limit 1/s -j ACCEPT
-    
-    # NAT for internal network (general)
-    iptables -t nat -A POSTROUTING -s 10.10.10.0/24 -o vmbr0 -j MASQUERADE
-    iptables -A FORWARD -s 10.10.10.0/24 -o vmbr0 -j ACCEPT
-    iptables -A FORWARD -d 10.10.10.0/24 -i vmbr0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-    
-    # SSH to bastion
-    iptables -t nat -A PREROUTING -i vmbr0 -p tcp --dport 2222 -j DNAT --to-destination 10.10.10.100:22
-    iptables -A FORWARD -p tcp -d 10.10.10.100 --dport 22 -j ACCEPT
-    
-    # Protection against common attacks
-    iptables -A INPUT -m recent --name blacklist --set -j DROP
-    iptables -A INPUT -p tcp --dport 8222 -m recent --name ssh --set
-    iptables -A INPUT -p tcp --dport 8222 -m recent --name ssh --rcheck --seconds 60 --hitcount 4 -j DROP
-    
-    iptables-save > /etc/iptables/rules.v4
-    log "IPv4 iptables rules saved"
-    
-    systemctl enable netfilter-persistent || true
-}
-
-# Configure Nginx as reverse proxy for bastion
-configure_nginx_proxy() {
-    log "Configuring Nginx reverse proxy..."
-    
-    # Create nginx configuration for VM proxy
-    cat > /etc/nginx/sites-available/vm-proxy << 'EOF'
-# Proxmox Web UI
-server {
-    listen 8080;
-    server_name _;
-
-    location / {
-        proxy_pass https://10.10.10.1:8006;
-        proxy_ssl_verify off;
-        proxy_set_header Host $host:$server_port;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        
-        # WebSocket support for Proxmox
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_buffering off;
-    }
-}
-
-# Template for future VMs - example VM web on 10.10.10.101:80
-#server {
-    #listen 8081;
-    #server_name _;
-
-    #location / {
-        #proxy_pass http://10.10.10.101:80;
-        #proxy_set_header Host $host:$server_port;
-        #proxy_set_header X-Real-IP $remote_addr;
-        #proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        #proxy_set_header X-Forwarded-Proto $scheme;
-    #}
-#}
-
-# Template for VM with HTTPS interface - example on 10.10.10.102:443
-#server {
-    #listen 8082;
-    #server_name _;
-
-    #location / {
-        #proxy_pass https://10.10.10.102:443;
-        #proxy_ssl_verify off;
-        #proxy_set_header Host $host:$server_port;
-        #proxy_set_header X-Real-IP $remote_addr;
-        #proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        #proxy_set_header X-Forwarded-Proto $scheme;
-    #}
-#}
-EOF
-
-    # Remove default nginx sites and enable our proxy
-    rm -f /etc/nginx/sites-enabled/*
-    ln -s /etc/nginx/sites-available/vm-proxy /etc/nginx/sites-enabled/
-    
-    # Test nginx configuration
-    if nginx -t; then
-        systemctl restart nginx
-        systemctl enable nginx
-        log "Nginx reverse proxy configured successfully"
-    else
-        log "WARNING: Nginx configuration test failed"
-    fi
-}
-# System security configuration
-# Remplacez votre fonction configure_security() par cette version corrigée :
-
-configure_security() {
-    log "Configuring system security..."
-    
-    # System audit configuration
-    if systemctl is-active --quiet auditd; then
-        log "auditd service active"
-    else
-        systemctl enable auditd
-        systemctl start auditd
-    fi
-    
-    # Configure fail2ban - jail configuration
-    sudo tee /etc/fail2ban/jail.local << 'EOF'
-[DEFAULT]
-# Ban time: 1 hour then more
-bantime = 3600
-findtime = 600
-maxretry = 3
-backend = systemd
-
-[sshd]
-enabled = true
-port = 22
-logpath = /var/log/auth.log
-backend = systemd
-maxretry = 3
-findtime = 600
-bantime = 3600
-ignoreip = 127.0.0.1/8 10.10.10.0/24
-
-[sshd-ddos]
-enabled = true
-port = 22
-logpath = /var/log/auth.log
-maxretry = 2
-findtime = 300
-bantime = 7200
-filter = sshd-ddos
-
-[port-scan]
-enabled = true
-logpath = /var/log/syslog
-maxretry = 5
-findtime = 300
-bantime = 86400
-filter = port-scan
-EOF
-
-    # Configure fail2ban filters
-    sudo tee /etc/fail2ban/filter.d/sshd-ddos.conf << 'EOF'
-[Definition]
-failregex = sshd\[\d+\]: Did not receive identification string from <HOST>
-            sshd\[\d+\]: Connection closed by <HOST> port \d+ \[preauth\]
-            sshd\[\d+\]: Invalid user .* from <HOST>
-            sshd\[\d+\]: User .+ from <HOST> not allowed because not listed in AllowUsers
-            sshd\[\d+\]: authentication failure; logname=.* uid=.* euid=.* tty=.* ruser=.* rhost=<HOST>
-ignoreregex =
-EOF
-
-    sudo tee /etc/fail2ban/filter.d/port-scan.conf << 'EOF'
-[Definition]
-failregex = kernel:.*\[UFW BLOCK\].*SRC=<HOST>
-ignoreregex =
-EOF
-
-    # Start fail2ban services
-    systemctl enable fail2ban
-    systemctl start fail2ban
-    
-    # More restrictive default permissions
-    sed -i 's/^UMASK.*/UMASK\t027/' /etc/login.defs
-    
-    # Disable unnecessary system accounts
-    for user in games news uucp proxy www-data backup list irc gnats nobody; do
-        if id "$user" &>/dev/null; then
-            usermod -L -s /bin/false "$user" 2>/dev/null || true
-        fi
-    done
-}
-# Generate SSH client configuration helper
-generate_ssh_config() {
-    log "Generating SSH client configuration..."
-    
-    cat > /root/generate-ssh-config.sh << EOF
-#!/bin/bash
-
-BASTION_HOST="${BASTION_HOST}"
-BASTION_PORT="${BASTION_PORT}"
-BASTION_USER="${BASTION_USER}"
-
-cat > /root/ssh-client-config << SSHEOF
-# Configuration SSH pour Safyra
-# Copiez ce contenu dans votre fichier ~/.ssh/config
-
-Host safyra-bastion
-    HostName \${BASTION_HOST}
-    Port \${BASTION_PORT}
-    User \${BASTION_USER}
-    # Tunnels for web interfaces
-    LocalForward 8080 localhost:8080  # Proxmox Web UI
-    LocalForward 8081 localhost:8081  # VM Web 1
-    LocalForward 8082 localhost:8082  # VM Web 2
-
-Host safyra-proxmox
-    HostName 10.10.10.1
-    Port 8222
-    User root
-    ProxyJump safyra-bastion
-
-# Alias rapides
-Host pve
-    HostName 10.10.10.1
-    Port 8222
-    User root
-    ProxyJump safyra-bastion
-
-Host bastion
-    HostName \${BASTION_HOST}
-    Port \${BASTION_PORT}
-    User \${BASTION_USER}
-SSHEOF
-
-echo "SSH Configuration generated in /root/ssh-client-config"
-echo ""
-echo "=== Client instructions==="
-echo "1. Download the file:"
-echo "   scp \${BASTION_USER}@\${BASTION_HOST}:\${BASTION_PORT}/root/ssh-client-config ~/.ssh/config-safyra"
-echo ""
-echo "2. Add it to ~/.ssh/config:"
-echo "   cat ~/.ssh/config-safyra >> ~/.ssh/config"
-echo ""
-echo "3. Connect:"
-echo "   ssh safyra-bastion"
-echo ""
-echo "4. Accédez aux interfaces web:"
-echo "   http://localhost:8080  -> Proxmox"
-echo "   http://localhost:8081  -> VM Web 1"
-echo "   http://localhost:8082  -> VM Web 2"
-EOF
-
-    chmod +x /root/generate-ssh-config.sh
-    
-    # Generate the configuration immediately with proper variable substitution
-    cat > /root/ssh-client-config << EOF
-# SSH Configuration for Safyra
-# Copy the content in your file ~/.ssh/config
-
-Host safyra-bastion
-    HostName ${BASTION_HOST}
-    Port ${BASTION_PORT}
-    User ${BASTION_USER}
-    # Tunnels for web interfaces
-    LocalForward 8080 localhost:8080  # Proxmox Web UI
-    LocalForward 8081 localhost:8081  # VM Web 1
-    LocalForward 8082 localhost:8082  # VM Web 2
-
-Host safyra-proxmox
-    HostName 10.10.10.1
-    Port 8222
-    User root
-    ProxyJump safyra-bastion
-
-# Alias rapides
-Host pve
-    HostName 10.10.10.1
-    Port 8222
-    User root
-    ProxyJump safyra-bastion
-
-Host bastion
-    HostName ${BASTION_HOST}
-    Port ${BASTION_PORT}
-    User ${BASTION_USER}
 EOF
     
-    log "SSH client configuration generated at /root/ssh-client-config"
+    # Update locate database
+    updatedb || true
+    
+    # Generate installation report
+    {
+        echo "=== SAFYRA INSTALLATION REPORT ==="
+        echo "Date: $(date)"
+        echo "Script Version: $SCRIPT_VERSION"
+        echo "Hostname: $(hostname)"
+        echo "Primary IP: $(ip route get 1 | awk '{print $7}' | head -1)"
+        echo "Users created: safyradmin"
+        echo "SSH Port: 8222"
+        echo "Bastion SSH Port: ${BASTION_PORT}"
+        echo "Bastion User: ${BASTION_USER}"
+        echo "Installation logs: $LOG_FILE"
+        echo "Credentials: $SAFYRA_CREDS_FILE"
+        echo "SSH Config Generator: /root/generate-ssh-config.sh"
+        echo "VM Template ID: 9000 (Debian 12 Cloud-Init)"
+        echo "Bastion VM ID: 200 (IP: 10.10.10.100)"
+        echo "===================================="
+        echo "Access Instructions:"
+        echo "1. SSH to bastion: ssh ${BASTION_USER}@${BASTION_HOST} -p ${BASTION_PORT}"
+        echo "2. SSH to Proxmox via bastion: ssh root@10.10.10.1 -p 8222 -o ProxyJump=${BASTION_USER}@${BASTION_HOST}:${BASTION_PORT}"
+        echo "3. Web access (via SSH tunnels):"
+        echo "   - Proxmox UI: http://localhost:8080"
+        echo "   - VM Web 1: http://localhost:8081"
+        echo "   - VM Web 2: http://localhost:8082"
+        echo "===================================="
+    } > /root/safyra_install_report.txt
+    
+    chmod 600 /root/safyra_install_report.txt
+    log "Installation report generated: /root/safyra_install_report.txt"
 }
 
 # Main function
@@ -1087,6 +1218,7 @@ main() {
     check_prerequisites
     backup_configs
     configure_system_base
+    setup_ssh_keys
     configure_ssh
     configure_network
     install_packages
@@ -1099,13 +1231,15 @@ main() {
     configure_security
     
     # VM setup (with error handling)
-    setup_vm_infrastructure
-    log "VM infrastructure setup completed"
+    if setup_vm_infrastructure; then
+        log "VM infrastructure setup completed"
         # Wait and configure bastion VM
-    sleep 60  # Give more time for VM to fully boot
-    configure_bastion_vm
+        sleep 60  # Give more time for VM to fully boot
+        configure_bastion_vm
+    else
+        log "WARNING: VM infrastructure setup failed, continuing without bastion VM"
+    fi
     
-
     run_security_audit
     cleanup_and_finalize
     
