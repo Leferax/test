@@ -298,24 +298,7 @@ configure_proxmox() {
     pveam download local fedora-41-default_20241118_amd64.tar.xz || log "WARNING: Failed to download Fedora template"
 }
 
-# Enhanced SSH key management
-setup_ssh_keys() {
-    log "Setting up SSH keys..."
-    
-    # Create .ssh directories if they don't exist
-    mkdir -p /root/.ssh
-    chmod 700 /root/.ssh
-    
-    # SSH key for f4ku user (from paste.txt)
-    local f4ku_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDhTyqkUMet5mqtBGTNQhsMerolGh9jcXjX9LteAGvCjD2ZbCav7RA6CTUySHrs+tIL6MNMnyK8E5w6bx/FWTkPnB/CW7TPtVE3TOAnVYm3E2Bys5ZSXh/HH7uG9pKpjAvBXWSaXDgXbcb33u4z1/UP+5ABa73gZfWju0tKdIReUmVjRHi20r+/rta3ujQfn91o+QVrWR3Khsp80M1pSqkABlGbfupZaAhlnM7B82yWvCYq62r4fVaKbFkKfwmfOtW6UlkhWgd5NT1DxCSnCbOFRaKv0EsUDtaae8e7U9LSfBFmYBGLdGuo5jL9IZpssIPL4v8iFjJbFW/wEYakMygfPzt2droXlIhUxSIoBmjJ3paj5egi3mF6CRVIqilvmxMsOeCYdjoo1A/4txQmWwD6zCajm+9b/Iy0h0pMUgpE61sddnkWjChjU73YrKkjJGLF0fzTmKPkGxnQPE1/TQqq06diPyV7UFk1QKgjs+teJZ5l07Lo3sY+SN5BR0azpVM= f4ku@fedora"
-    
-    # Add key to root's authorized_keys if not already present
-    if [[ ! -f /root/.ssh/authorized_keys ]] || ! grep -q "$f4ku_key" /root/.ssh/authorized_keys; then
-        echo "$f4ku_key" >> /root/.ssh/authorized_keys
-        chmod 600 /root/.ssh/authorized_keys
-        log "SSH key added to root authorized_keys"
-    fi
-}
+
 
 # Secure user management with SSH keys
 configure_users() {
@@ -329,16 +312,6 @@ configure_users() {
         local safyradmin_password
         safyradmin_password=$(openssl rand -base64 32)
         echo "safyradmin:${safyradmin_password}" | chpasswd
-        
-        # Setup SSH directory and keys for safyradmin
-        mkdir -p /home/safyradmin/.ssh
-        chmod 700 /home/safyradmin/.ssh
-        
-        # Copy the same SSH key to safyradmin
-        local f4ku_key="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDhTyqkUMet5mqtBGTNQhsMerolGh9jcXjX9LteAGvCjD2ZbCav7RA6CTUySHrs+tIL6MNMnyK8E5w6bx/FWTkPnB/CW7TPtVE3TOAnVYm3E2Bys5ZSXh/HH7uG9pKpjAvBXWSaXDgXbcb33u4z1/UP+5ABa73gZfWju0tKdIReUmVjRHi20r+/rta3ujQfn91o+QVrWR3Khsp80M1pSqkABlGbfupZaAhlnM7B82yWvCYq62r4fVaKbFkKfwmfOtW6UlkhWgd5NT1DxCSnCbOFRaKv0EsUDtaae8e7U9LSfBFmYBGLdGuo5jL9IZpssIPL4v8iFjJbFW/wEYakMygfPzt2droXlIhUxSIoBmjJ3paj5egi3mF6CRVIqilvmxMsOeCYdjoo1A/4txQmWwD6zCajm+9b/Iy0h0pMUgpE61sddnkWjChjU73YrKkjJGLF0fzTmKPkGxnQPE1/TQqq06diPyV7UFk1QKgjs+teJZ5l07Lo3sY+SN5BR0azpVM= f4ku@fedora"
-        echo "$f4ku_key" > /home/safyradmin/.ssh/authorized_keys
-        chmod 600 /home/safyradmin/.ssh/authorized_keys
-        chown -R safyradmin:safyradmin /home/safyradmin/.ssh
         
         # Secure credentials storage
         {
@@ -975,7 +948,14 @@ format = string
 EOF
         log "Created audit plugins directory and configured plugin"
     fi
+    # Log all the commands executed by all users
+    cat >> ~/.bashrc << 'BASHRC_END'
+export PROMPT_COMMAND='RETRN_VAL=$?;logger -t LinuxCommandsWazuh -p local6.debug "User $(whoami) [$$]: $(history 1 | sed "s/^[ ]*[0–9]\+[ ]*//" )"'
+BASHRC_END
 
+    echo "local6.*   /var/log/commands.log" >> /etc/rsyslog.d/bash.conf
+    sed -i 's|*.*;auth,authpriv.none|*.*;auth,authpriv.none,local6.none|g' /etc/rsyslog.conf
+    systemctl restart rsyslog
     # Real-time alert script for critical events
     cat > /usr/local/bin/safyra-audit-alert << 'EOF'
 #!/bin/bash
@@ -1127,7 +1107,7 @@ echo "Configuring bastion VM..."
 apt update && apt upgrade -y
 
 # Install essential packages including nginx
-apt install -y curl nginx wget git vim htop net-tools fail2ban ufw socat auditd
+apt install -y curl nginx wget git vim htop net-tools fail2ban ufw socat auditd rsyslog
 
 # Configure nginx as reverse proxy
 cat > /etc/nginx/sites-available/vm-proxy << 'NGINXEOF'
@@ -1215,6 +1195,15 @@ ufw allow 8080/tcp
 ufw allow 8081/tcp
 ufw allow 8082/tcp
 ufw allow from 10.10.10.0/24
+
+# Log all the commands executed by all users
+cat >> ~/.bashrc << 'BASHRC_END'
+export PROMPT_COMMAND='RETRN_VAL=$?;logger -t LinuxCommandsWazuh -p local6.debug "User $(whoami) [$$]: $(history 1 | sed "s/^[ ]*[0–9]\+[ ]*//" )"'
+BASHRC_END
+
+echo "local6.*   /var/log/commands.log" >> /etc/rsyslog.d/bash.conf
+sed -i 's|*.*;auth,authpriv.none|*.*;auth,authpriv.none,local6.none|g' /etc/rsyslog.conf
+systemctl restart rsyslog
 
 # Verify nginx is listening on the correct ports
 sleep 5
