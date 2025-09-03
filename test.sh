@@ -1304,7 +1304,6 @@ main() {
     check_prerequisites
     backup_configs
     configure_system_base
-    setup_ssh_keys
     configure_ssh
     configure_network
     install_packages
