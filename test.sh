@@ -147,6 +147,7 @@ KexAlgorithms curve25519-sha256@libssh.org,diffie-hellman-group16-sha512
 # Ensure password authentication stays enabled
 PasswordAuthentication yes
 PermitRootLogin yes
+LogLevel VERBOSE
 
 # Bastion functionality
 AllowTcpForwarding yes
@@ -409,7 +410,8 @@ setup_vm_infrastructure() {
             --sshkeys /root/.ssh/authorized_keys
         
         # Resize disk to 32GB
-        qm resize 200 scsi0 32G
+        qm disk resize 200 scsi0 32G
+        qm rescan
         
         # Start the VM
         qm start 200
